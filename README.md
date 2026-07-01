@@ -1,0 +1,1 @@
+python scripts/train.py Unitree-G1-Transition --env.scene.num-envs=4096
