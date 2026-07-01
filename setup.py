@@ -8,6 +8,7 @@ INSTALL_REQUIRES = [
     "mjlab==1.2.0",
     "mujoco-warp==3.5.0",
     "mujoco==3.5.0",
+    "scipy",
 ]
 
 
