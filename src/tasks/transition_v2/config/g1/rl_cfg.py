@@ -47,5 +47,5 @@ def unitree_g1_transition_v2_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
     experiment_name="g1_transition_v2",
     save_interval=100,
     num_steps_per_env=32,  # Slightly larger than v1 (24) for the longer 20 s episode
-    max_iterations=10001,
+    max_iterations=15001,
   )

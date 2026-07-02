@@ -1,3 +1,9 @@
+## Unitreerobotics Unitree Rl Mjlab:
+
+```bash
+https://github.com/unitreerobotics/unitree_rl_mjlab.git
+```
+
 ## Setup
 
 Create a virtual environment with Python 3.10 using `uv`:
@@ -45,7 +51,7 @@ Available environments:
 **CPU (no GPU):**
 
 ```bash
-uv run python scripts/train.py Unitree-G1-Transition --agent.gpu-ids null
+uv run python scripts/train.py Unitree-G1-Transition --gpu-ids null
 ```
 
 **Single GPU (default, GPU 0):**
@@ -67,7 +73,7 @@ uv run python scripts/train.py Unitree-G1-Transition --agent.gpu-ids 1
 **Multi-GPU:**
 
 ```bash
-uv run python scripts/train.py Unitree-G1-Transition --agent.gpu-ids all
+uv run python scripts/train.py Unitree-G1-Transition --gpu-ids all
 ```
 
 ## Play
