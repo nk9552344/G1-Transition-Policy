@@ -59,6 +59,8 @@ uv run python scripts/train.py Unitree-G1-Transition --gpu-ids null
 ```bash
 uv run python scripts/train.py Unitree-G1-Transition --env.scene.num-envs 4096
 
+uv run python scripts/train.py Unitree-G1-RecoveryV1 --env.scene.num-envs=512
+
 # or 
 
 uv run python scripts/train.py Unitree-G1-Transition --env.scene.num-envs=512
