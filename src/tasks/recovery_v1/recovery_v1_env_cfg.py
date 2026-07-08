@@ -1,55 +1,58 @@
 """Recovery-v1: full floor-recovery task configuration.
 
 Extends transition-v3 so the robot learns to stand up from a completely
-fallen position (supine, prone, or side-lying) in addition to all the
-bent-upright starting configurations introduced in v3.
+fallen position (supine, prone) in addition to all the bent-upright starting
+configurations introduced in v3.
 
 Key additions over v3
 ─────────────────────
 Initial states
-  Eight templates sampled uniformly each episode (4 fallen + 4 bent):
-    Fallen:  supine, prone, side-left, side-right  (base_z ≈ 0.25 m)
-    Bent:    home, knees_bent, squat, deep_squat    (FK-verified heights)
+  Six templates sampled uniformly each episode (2 fallen, 33 % + 4 bent, 67 %):
+    Fallen:  supine, prone                         (base_z ≈ 0.25 m)
+    Bent:    home, knees_bent, squat, deep_squat   (FK-verified heights)
 
-  The "fell_over" termination is removed entirely: the robot starts at 90°
-  tilt (fallen), which would immediately trigger the v3 limit of 75°.  Only
-  the timeout termination remains.
+  The 67/33 split matters: 50 % fallen caused complete training failure at
+  17 k iters because conflicting gradient signals (large actions for recovery,
+  near-zero for balance) collapsed the single scalar std to 0.3 — simultaneously
+  too small for floor recovery and too large for standing stability.
+
+Termination: height-gated fell_over (replaces the deleted termination)
+  bad_orientation_while_elevated fires when BOTH:
+    (a) body tilt > 75°  AND  (b) base height > 0.50 m.
+
+  The height gate (0.50 m) is the critical fix:
+    • Fallen starts (h ≈ 0.10–0.15 m):  gate closed → never fires → robot has
+      the full 35 s episode to discover the get-up motion.
+    • Upright/bent starts (h 0.56–0.80 m): gate open → if the robot tips over
+      the episode terminates immediately (same urgency as v3).
+    • Mid-recovery (h > 0.50 m): a partial stand that falls sideways is also
+      terminated — the robot is penalised for unstable intermediate positions.
+
+  This restores the v3 "don't fall while upright" signal that was lost when
+  the original fell_over was removed, without breaking fallen initial states.
 
 Reward changes
   orientation_recovery (+3.0, std=1.0)
-    Primary get-up signal.  Gaussian reward for the torso being upright.
-    Unlike body_orientation_l2 (which is symmetric for upright and upside-
-    down), this term uses (proj_gz + 1.0)² so the gradient is meaningful
-    from every starting orientation.
+    Primary get-up signal. Gaussian on (proj_gz + 1.0)² — distinguishes
+    upright (0), flat (1), and inverted (4) unlike body_orientation_l2.
 
   height_recovery (+2.0, target=0.78 m, std=0.65 m)
-    Secondary get-up signal.  Rewards the pelvis rising toward the standing
-    height.  Wide std provides gradient from the 0.25 m fallen starting
-    height to the 0.80 m standing height.
+    Secondary get-up signal. Gradient nonzero from 0.25 m fallen to 0.80 m.
 
   pose_convergence_gated (replaces pose_convergence, +1.5, std=0.5)
-    Joint-pose convergence, but gated by how upright the robot is.  When
-    the robot is flat the gate ≈ 0, preventing the policy from learning
-    "stay flat in default joints" as a local optimum.  Gate = -proj_gz,
-    clamped to [0, 1].
+    Gated by (-proj_gz).clamp(0,1) so the pose reward is suppressed when the
+    robot is flat — prevents "stay flat in default joints" local optimum.
 
   body_orientation_l2 weight increased to -3.0 (was -2.0 in v3).
-    The robot now spends more episode time in tilted orientations; the
-    stronger penalty ensures a robust upright signal throughout.
 
-  is_terminated removed.
-    The only remaining termination is timeout; is_terminated never fires
-    so including it would add noise to the reward without benefit.
+  is_terminated KEPT from v3 at weight=-200.
+    Since bad_orientation_while_elevated can now fire (for upright episodes),
+    the termination penalty is meaningful and must remain.
 
   push_robot kept from v3 (interval 8–10 s).
-    If the robot stands up within ~8 s, the push tests recovery from a
-    disturbance while standing — exactly the scenario recovery_v1 should
-    handle.  If the robot is still fallen at 8 s, the push adds realistic
-    momentum noise.
 
 Episode length
-  35 s (extended from v3's 25 s): getting up from flat ground takes more
-  time than rising from a deep squat.
+  35 s (extended from v3's 25 s).
 """
 
 import math
@@ -57,6 +60,7 @@ import math
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
+from mjlab.managers.termination_manager import TerminationTermCfg
 
 import src.tasks.recovery_v1.mdp as mdp
 from src.tasks.recovery_v1.mdp.events import ALL_POSE_CONFIGS
@@ -74,7 +78,7 @@ def make_recovery_v1_env_cfg():
     func=mdp.reset_to_fallen_or_bent_pose,
     mode="reset",
     params={
-      # Unified list: 4 fallen templates + 4 bent templates.
+      # Unified list: 2 fallen (supine/prone) + 4 bent = 6 templates (33 / 67 %).
       "all_pose_configs": ALL_POSE_CONFIGS,
       # Scatter position (same as v3).
       "xy_pos_range": 0.5,       # ±0.5 m cell scatter
@@ -96,14 +100,30 @@ def make_recovery_v1_env_cfg():
     },
   )
 
-  # ── Remove fell_over termination ──────────────────────────────────────────
-  # The robot starts at 90° tilt (fallen), exceeding the v3 75° limit.
-  # Without this removal the episode would terminate on the very first step.
-  del cfg.terminations["fell_over"]
+  # ── Replace fell_over with height-gated version ───────────────────────────
+  # The vanilla fell_over (angle > 75°) fires immediately for fallen initial
+  # states (starting at 90°), which is why it was deleted in the first attempt.
+  # The fix: add a height gate — only fire when base_height > 0.50 m.
+  #
+  # Height gate ensures:
+  #   fallen starts   (h ≈ 0.10–0.15 m):  gate closed → episode runs full 35 s
+  #   upright starts  (h 0.56–0.80 m):    gate open   → termination fires → is_terminated(-200)
+  #   mid-recovery    (h > 0.50 m):        gate open   → termination fires if unstable
+  #
+  # This restores the critical "falling is catastrophic" gradient for upright
+  # episodes, which was accidentally lost in the original recovery_v1 design.
+  cfg.terminations["fell_over"] = TerminationTermCfg(
+    func=mdp.bad_orientation_while_elevated,
+    params={
+      "limit_angle": math.radians(75.0),
+      "height_threshold": 0.50,   # m — all fallen poses settle at h < 0.25 m
+    },
+  )
 
-  # ── Remove is_terminated reward ───────────────────────────────────────────
-  # With only the timeout termination remaining, is_terminated never fires.
-  del cfg.rewards["is_terminated"]
+  # ── Keep is_terminated reward ─────────────────────────────────────────────
+  # bad_orientation_while_elevated can now fire for upright episodes, so the
+  # is_terminated(-200) penalty is meaningful and must remain from v3.
+  # (No change needed — just don't delete it.)
 
   # ── Replace pose_convergence with gated version ───────────────────────────
   # The ungated version would reward default joint angles even when the robot

@@ -1,17 +1,30 @@
 """Custom reset events for recovery-v1: full floor-recovery training.
 
 The core new event is ``reset_to_fallen_or_bent_pose``, which extends v3's
-``reset_to_bent_pose`` with four completely fallen orientations (supine, prone,
-side-left, side-right) so the robot learns to stand up from any ground-level
-starting position.
+``reset_to_bent_pose`` with two completely fallen orientations (supine, prone)
+so the robot learns to stand up from the most common ground-level positions.
 
-Eight templates are sampled uniformly each episode:
-  Fallen (50 %)                  Bent-upright (50 %)
+Six templates are sampled uniformly each episode (67 % bent, 33 % fallen):
+  Fallen (33 %)                  Bent-upright (67 %)
   ─────────────────────────────  ────────────────────────────────────────────
   supine     (on back, face up)  home        (default standing, small bends)
   prone      (face down)         knees_bent  (moderate squat)
-  side_left  (left side down)    squat       (deep knee bend)
-  side_right (right side down)   deep_squat  (maximum knee bend)
+                                 squat       (deep knee bend)
+                                 deep_squat  (maximum knee bend)
+
+Sampling ratio rationale
+────────────────────────
+Starting with 50 % fallen caused complete training failure: the 50/50 split
+produces conflicting gradient signals — fallen episodes need *large* exploratory
+actions while standing episodes need *near-zero* actions — but RSL-RL's single
+scalar std cannot accommodate both simultaneously.  At std=0.3 (the collapsed
+value after 17 k iters) the policy was simultaneously too timid for floor
+recovery and too noisy for balance maintenance.
+
+Reducing fallen fraction to 33 % lets the policy first stabilise the standing
+skill (where the reward is high and the gradient is clear), then generalise to
+floor recovery.  Side-lying poses (side_left, side_right) are deferred to
+recovery_v2 once the supine/prone recovery is reliable.
 
 Fallen templates set the pelvis height to 0.25 m and apply a random world-
 frame yaw so the robot faces a different direction every episode.  Bent
@@ -84,9 +97,11 @@ BENT_POSE_CONFIGS: list[dict] = [
   {"knee": 1.800, "hip_pitch": -1.000, "ankle": -0.600, "base_z": 0.5616},
 ]
 
-# Unified list for uniform sampling: 4 fallen + 4 bent = 8 templates total.
+# Unified list for uniform sampling: 2 fallen + 4 bent = 6 templates (33 % / 67 %).
+# Only supine and prone: the two most common and most critical falls.
+# Side-lying templates are deferred to recovery_v2.
 ALL_POSE_CONFIGS: list[dict] = [
-  {**cfg, "type": "fallen"} for cfg in FALLEN_POSE_CONFIGS
+  {**cfg, "type": "fallen"} for cfg in FALLEN_POSE_CONFIGS[:2]   # supine, prone only
 ] + [
   {**cfg, "type": "bent"}   for cfg in BENT_POSE_CONFIGS
 ]
