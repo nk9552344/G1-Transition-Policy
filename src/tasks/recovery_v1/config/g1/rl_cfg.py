@@ -7,6 +7,11 @@ Same network architecture as the transition series.  Adjustments:
     than squat-to-stand and needs more training time.
   init_std: kept at 1.0 — the task is harder but the same exploration
     breadth is appropriate; the extra iterations handle the difficulty.
+  entropy_coef: increased to 0.03 (was 0.01) — floor recovery from flat
+    requires more exploration diversity.  In the failed run, std collapsed
+    from 0.9 to 0.35 by step 400, leaving flat episodes with insufficient
+    action variety to discover the get-up motion.  Higher entropy resists
+    this premature convergence.
 """
 
 from mjlab.rl import (
@@ -38,7 +43,7 @@ def unitree_g1_recovery_v1_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
       value_loss_coef=1.0,
       use_clipped_value_loss=True,
       clip_param=0.2,
-      entropy_coef=0.01,
+      entropy_coef=0.03,
       num_learning_epochs=5,
       num_mini_batches=4,
       learning_rate=1.0e-3,

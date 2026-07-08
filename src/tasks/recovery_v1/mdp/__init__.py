@@ -36,5 +36,6 @@ from .rewards import (                             # noqa: F401
   height_recovery,
   orientation_recovery,
   pose_convergence_gated,
+  upward_base_velocity,
 )
 from .terminations import bad_orientation_while_elevated  # noqa: F401

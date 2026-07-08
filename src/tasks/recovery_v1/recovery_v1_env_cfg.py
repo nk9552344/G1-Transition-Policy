@@ -43,6 +43,14 @@ Reward changes
     Gated by (-proj_gz).clamp(0,1) so the pose reward is suppressed when the
     robot is flat — prevents "stay flat in default joints" local optimum.
 
+  upward_base_velocity (+3.0, height_gate=0.60 m, max_vel=2.0)
+    The key missing ingredient: immediate positive feedback for ANY upward
+    motion of the base.  Fires only below 0.60 m (flat → mid-recovery phase).
+    Without this, flat-and-still gives -0.09/step whether the robot tries or
+    not — no gradient incentive for exploratory large actions.  With this,
+    flat+pushing-up gives +0.9 to +3.0/step, creating a positive feedback
+    loop: push off ground → upward velocity → reward → discover get-up motion.
+
   body_orientation_l2 weight increased to -3.0 (was -2.0 in v3).
 
   is_terminated KEPT from v3 at weight=-200.
@@ -166,6 +174,22 @@ def make_recovery_v1_env_cfg():
       "target_height": 0.78,
       # std=0.65: gradient is nonzero from 0.25 m (fallen) through 0.78 m.
       "std": 0.65,
+      "asset_cfg": SceneEntityCfg("robot"),
+    },
+  )
+
+  # ── Add upward_base_velocity reward ─────────────────────────────────────
+  # The key missing ingredient for floor recovery.  Flat-and-still gives
+  # -0.09/step regardless of action; this reward makes flat+pushing-up give
+  # +0.81 to +3.0/step — a direct positive feedback loop for get-up motions.
+  # Height gate of 0.60 m covers the entire flat-to-mid-recovery phase and
+  # also benefits deep-squat episodes (base_z ≈ 0.56 m).
+  cfg.rewards["upward_base_velocity"] = RewardTermCfg(
+    func=mdp.upward_base_velocity,
+    weight=3.0,
+    params={
+      "height_gate": 0.60,   # m — gate closes above squat-to-standing transition
+      "max_vel": 2.0,        # m/s clip — prevents reward hacking from wild jumps
       "asset_cfg": SceneEntityCfg("robot"),
     },
   )

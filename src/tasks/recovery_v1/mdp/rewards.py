@@ -88,6 +88,52 @@ def height_recovery(
   return torch.exp(-dist_sq / std**2)
 
 
+def upward_base_velocity(
+  env: ManagerBasedRlEnv,
+  height_gate: float,
+  max_vel: float,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Reward upward (world-z) velocity of the base when below standing height.
+
+  This is the critical missing ingredient for floor recovery: it gives
+  *immediate* positive feedback for any upward motion, even before the robot
+  is significantly more upright or higher.
+
+  Without this reward, flat-and-still gives -0.09/step whether the robot
+  tries or not — no gradient incentive for large exploratory actions.  With
+  this reward, flat+pushing-up gives +0.9 to +3.0/step per 0.3–1.0 m/s of
+  upward velocity, creating a direct positive feedback loop:
+    push off ground → upward vel → reward → stronger push → more reward → stand up.
+
+  Height gate: only fire below height_gate (recommended 0.60 m).  This covers
+  the entire flat → mid-recovery phase (0.12 m → 0.60 m) and also benefits
+  deep-squat episodes (base_z ≈ 0.56 m).  Episodes above 0.60 m (squat,
+  knees-bent, home) do not get this reward — they rely on orientation +
+  height_recovery rewards for final stand-up polish.
+
+  Args:
+    height_gate: Only fire when base_height < height_gate (m).  Recommended: 0.60.
+    max_vel: Clip upward velocity at this value (m/s).  Recommended: 2.0 to
+      prevent reward hacking from wild jumps.
+    asset_cfg: Resolved SceneEntityCfg for the robot.
+
+  Returns:
+    Reward tensor [B], range [0, max_vel].
+  """
+  asset = env.scene[asset_cfg.name]
+
+  # World-frame linear velocity is directly available; take the z component.
+  v_z_world = asset.data.root_com_vel_w[:, 2]      # (B,): positive = moving up
+
+  base_height = (
+    asset.data.root_link_pos_w[:, 2] - env.scene.env_origins[:, 2]
+  )  # (B,)
+  gate = (base_height < height_gate).float()       # 1 below height_gate, 0 above
+
+  return v_z_world.clamp(0.0, max_vel) * gate
+
+
 def pose_convergence_gated(
   env: ManagerBasedRlEnv,
   std: float,
