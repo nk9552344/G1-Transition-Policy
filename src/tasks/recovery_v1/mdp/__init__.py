@@ -33,9 +33,12 @@ from src.tasks.transition_v2.mdp.rewards import (  # noqa: F401
 # Recovery-v1 additions.
 from .events import reset_to_fallen_or_bent_pose   # noqa: F401
 from .rewards import (                             # noqa: F401
+  arm_reach_down,
+  elbow_push_from_ground,
   height_recovery,
+  orientation_rate,
   orientation_recovery,
   pose_convergence_gated,
-  upward_base_velocity,
+  torso_upward_velocity,
 )
 from .terminations import bad_orientation_while_elevated  # noqa: F401

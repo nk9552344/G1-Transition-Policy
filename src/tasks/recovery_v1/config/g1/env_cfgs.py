@@ -56,7 +56,31 @@ def unitree_g1_recovery_v1_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     history_length=4,
   )
 
-  cfg.scene.sensors = (cfg.scene.sensors or ()) + (feet_ground_cfg, self_collision_cfg)
+  # Arm ground contact sensor.
+  # Primary: subtree of left_elbow_link and right_elbow_link — covers all forearm
+  # geoms (left_elbow_yaw_collision, left_wrist_collision, left_hand_collision and
+  # the right-side equivalents).  This means the sensor fires whether the robot
+  # presses its elbows, wrists, or palms into the terrain.
+  # Secondary: terrain.
+  # Two primary patterns -> sensor.data.found shape (B, 2) [left arm, right arm].
+  arm_ground_cfg = ContactSensorCfg(
+    name="arm_ground_contact",
+    primary=ContactMatch(
+      mode="subtree",
+      pattern=r"^(left_elbow_link|right_elbow_link)$",
+      entity="robot",
+    ),
+    secondary=ContactMatch(mode="body", pattern="terrain"),
+    fields=("found",),
+    reduce="netforce",
+    num_slots=1,
+  )
+
+  cfg.scene.sensors = (cfg.scene.sensors or ()) + (
+    feet_ground_cfg,
+    self_collision_cfg,
+    arm_ground_cfg,
+  )
 
   joint_pos_action = cfg.actions["joint_pos"]
   assert isinstance(joint_pos_action, JointPositionActionCfg)
@@ -79,6 +103,22 @@ def unitree_g1_recovery_v1_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   # G1 reward body references.
   cfg.rewards["body_orientation_l2"].params["asset_cfg"].body_names = ("torso_link",)
   cfg.rewards["body_ang_vel"].params["asset_cfg"].body_names = ("torso_link",)
+  cfg.rewards["torso_upward_velocity"].params["asset_cfg"].body_names = ("torso_link",)
+
+  # G1 arm reward body references.
+  # arm_reach_down tracks the wrist_yaw_link bodies (palms / hand endpoint).
+  cfg.rewards["arm_reach_down"].params["asset_cfg"].body_names = (
+    "left_wrist_yaw_link",
+    "right_wrist_yaw_link",
+  )
+  # elbow_push_from_ground tracks the elbow_link bodies.
+  # The arm_ground_contact sensor (arm_ground_cfg) is still present in the scene
+  # and is used internally by elbow_push_from_ground for its per-arm contact gate;
+  # it is no longer registered as a standalone reward (removed: local-optimum trap).
+  cfg.rewards["elbow_push_from_ground"].params["asset_cfg"].body_names = (
+    "left_elbow_link",
+    "right_elbow_link",
+  )
 
   # Self-collision penalty — same as v3.
   cfg.rewards["self_collisions"] = RewardTermCfg(
