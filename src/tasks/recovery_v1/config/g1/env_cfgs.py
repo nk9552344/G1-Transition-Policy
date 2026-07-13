@@ -103,7 +103,7 @@ def unitree_g1_recovery_v1_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   # G1 reward body references.
   cfg.rewards["body_orientation_l2"].params["asset_cfg"].body_names = ("torso_link",)
   cfg.rewards["body_ang_vel"].params["asset_cfg"].body_names = ("torso_link",)
-  cfg.rewards["torso_upward_velocity"].params["asset_cfg"].body_names = ("torso_link",)
+  cfg.rewards["torso_height_reward"].params["asset_cfg"].body_names = ("torso_link",)
 
   # G1 arm reward body references.
   # arm_reach_down tracks the wrist_yaw_link bodies (palms / hand endpoint).
@@ -118,6 +118,15 @@ def unitree_g1_recovery_v1_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg.rewards["elbow_push_from_ground"].params["asset_cfg"].body_names = (
     "left_elbow_link",
     "right_elbow_link",
+  )
+
+  # G1 stand-up phase reward body references.
+  # head_height_reward uses torso_link (head geom is inside torso_link at +0.43 m).
+  cfg.rewards["head_height_reward"].params["asset_cfg"].body_names = ("torso_link",)
+  # feet_proximity_reward tracks ankle_roll_link as foot proxies.
+  cfg.rewards["feet_proximity_reward"].params["asset_cfg"].body_names = (
+    "left_ankle_roll_link",
+    "right_ankle_roll_link",
   )
 
   # Self-collision penalty — same as v3.

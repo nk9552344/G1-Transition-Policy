@@ -101,53 +101,56 @@ def height_recovery(
   return torch.exp(-dist_sq / std**2)
 
 
-def torso_upward_velocity(
+def torso_height_reward(
   env: ManagerBasedRlEnv,
-  height_gate: float,
-  max_vel: float,
+  target_height: float,
+  std: float,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-  """Reward upward velocity of the torso (chest) body when below standing height.
+  """Reward the torso (chest) body being elevated toward the standing height.
 
-  Unlike upward_base_velocity which tracked the pelvis root link, this tracks
-  the torso_link (chest body). This distinction is critical:
+  Position-based (not velocity-based). This distinction is critical:
 
-    Leg-bridge maneuver (local optimum):
-      Pelvis rises to 0.35-0.45 m -> would trigger upward_base_velocity
-      Torso (chest) stays on ground at 0.10-0.20 m -> zero reward here
+    torso_upward_velocity (REMOVED - velocity-based, gameable):
+      Rewards max(0, v_z) per step. Oscillation (torso up-then-down) earns
+      reward on the upward half-cycle and 0 on the downward half. Net per
+      oscillation = 50% of the amplitude reward. The robot discovers it can
+      farm this by wiggling waist joints -- the "torso wiggling" behavior.
 
-    Arm push-up / rolling recovery (correct behavior):
-      Torso rises -> positive reward -> policy learns arm-coordinated get-up
+    torso_height_reward (this function - position-based, not gameable):
+      Rewards exp(-(torso_z - target)^2 / std^2) -- the CURRENT height.
+      Oscillation between z_low and z_high gives average reward equal to
+      the reward at the mean position. No benefit over holding still.
+      The robot MUST find a way to SUSTAIN a higher torso position, which
+      requires arm support from the ground.
 
-  The height gate should match the termination threshold (0.65 m) so the
-  reward covers the entire flat-to-mid-recovery phase without overlapping
-  with the standing-stability regime.
+  Gradient chain:
+    Flat,  torso=0.15 m: exp(-(0.15-0.90)^2 / 0.50^2) = 0.105 * 3.0 = +0.32
+    Push-up torso=0.50 m: exp(-(0.50-0.90)^2 / 0.50^2) = 0.527 * 3.0 = +1.58
+    Standing torso=0.90 m: 1.0 * 3.0 = +3.0
+
+  Sustained elevation (push-up position) gives 5x more reward than lying flat.
+  Only arm support can sustain the push-up height, closing the oscillation trap.
 
   asset_cfg must have body_names set to the torso body (e.g. "torso_link")
   by the robot-specific config (same pattern as body_orientation_l2).
 
   Args:
-    height_gate: Gate closes above this torso height (m). Recommended 0.90 m
-      for G1: covers flat (0.15 m) through mid-squat (0.75 m) without firing
-      when the robot is fully standing (torso ~= 1.0 m).
-    max_vel: Clamp upward torso velocity at this value (m/s). Recommended 1.5
-      to prevent wild swings while still rewarding aggressive recovery.
-    asset_cfg: Resolved SceneEntityCfg for the torso body (body_names set
-      per robot, e.g. "torso_link" for G1).
+    target_height: Torso height (m) target. G1 torso_link when standing ~= 0.90 m.
+    std: Gaussian width (m). std=0.50 gives nonzero gradient from 0.15 m (flat)
+      to 0.90 m (standing).
+    asset_cfg: Resolved SceneEntityCfg for the torso body (body_names set per robot).
 
   Returns:
-    Reward tensor [B], range [0, max_vel].
+    Reward tensor [B], range [0, 1].
   """
   asset = env.scene[asset_cfg.name]
-  # body_link_lin_vel_w: (B, num_bodies, 3) world-frame linear velocities.
-  # asset_cfg.body_ids selects the torso body; squeeze removes the body dim.
-  lin_vel_z = asset.data.body_link_lin_vel_w[:, asset_cfg.body_ids, 2].squeeze(1)  # (B,)
-  pos_z = (
+  torso_z = (
     asset.data.body_link_pos_w[:, asset_cfg.body_ids, 2].squeeze(1)
     - env.scene.env_origins[:, 2]
   )  # (B,)
-  gate = (pos_z < height_gate).float()
-  return lin_vel_z.clamp(0.0, max_vel) * gate
+  dist_sq = torch.square(torso_z - target_height)
+  return torch.exp(-dist_sq / std**2)
 
 
 def orientation_rate(
@@ -191,9 +194,125 @@ def orientation_rate(
   return improvement * not_upright
 
 
+def head_height_reward(
+  env: ManagerBasedRlEnv,
+  target_height: float,
+  std: float,
+  head_offset: float = 0.43,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Reward the head being at standing height — stronger sit-to-stand gradient.
+
+  The G1 head has no separate body link: it is a geom inside torso_link at
+  local position (0, 0, 0.43 m). The head world Z is:
+
+      head_z ≈ torso_z + head_offset × cos(tilt)
+             = torso_z + head_offset × (-proj_gz)
+
+  because R_{22} = cos(tilt) = -proj_gz (proj_gz = -1 when upright).
+
+  This creates a much sharper sitting-vs-standing distinction than torso alone:
+    Flat   (torso=0.15, proj_gz= 0.0): head_z = 0.15 + 0.00 = 0.15 m
+    Sit-up (torso=0.60, proj_gz=-0.77): head_z = 0.60 + 0.33 = 0.93 m
+    Stand  (torso=0.90, proj_gz=-1.0 ): head_z = 0.90 + 0.43 = 1.33 m
+
+  The reward at target=1.30 m, std=0.60 m:
+    Flat:    exp(-4.0) = 0.018   -> near-zero
+    Sit-up:  exp(-0.44) = 0.644  -> moderate
+    Stand:   exp(-0.00) = 1.000  -> maximum
+
+  This creates strong gradient from sit-up -> stand without rewarding oscillation.
+
+  asset_cfg must have body_names set to the torso body (same as body_orientation_l2).
+  proj_gz is taken from root_link projected_gravity_b (pelvis frame), which is a
+  good approximation of the torso orientation when waist joints are small.
+
+  Args:
+    target_height: Head height (m) target. G1 standing head ~= 1.30-1.35 m.
+    std: Gaussian width (m). 0.60 m gives gradient from 0.15 m to 1.35 m.
+    head_offset: Head center height above torso_link origin (m). G1 = 0.43 m.
+    asset_cfg: Resolved SceneEntityCfg for the torso body (body_names set per robot).
+  """
+  asset = env.scene[asset_cfg.name]
+  torso_z = (
+    asset.data.body_link_pos_w[:, asset_cfg.body_ids, 2].squeeze(1)
+    - env.scene.env_origins[:, 2]
+  )  # (B,)
+  proj_gz = asset.data.projected_gravity_b[:, 2]          # (B,): -1 upright, 0 flat
+  head_z = torso_z + head_offset * (-proj_gz)             # (B,): head world Z approx
+  dist_sq = torch.square(head_z - target_height)
+  return torch.exp(-dist_sq / std**2)
+
+
+def feet_proximity_reward(
+  env: ManagerBasedRlEnv,
+  height_gate: float,
+  std: float = 0.30,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """When pelvis is elevated, reward feet being horizontally close to the pelvis.
+
+  This guides the "tuck feet under body" phase of standing up. After the robot
+  raises its upper body (push-up phase), it must bring its feet under the pelvis
+  to be able to stand. This requires bending the knees deeply and pivoting the
+  hips. Without an explicit reward, the robot stays in the seated-with-legs-
+  -extended local optimum even though the upper body is raised.
+
+  The reward measures horizontal (XY) distance from each foot to the pelvis.
+  It is gated off when the pelvis is below height_gate (flat ground: feet
+  distance to pelvis is meaningless when the robot is fully prone).
+
+    Sitting, legs extended: foot XY ≈ 0.5-0.8 m forward of pelvis -> low reward
+    Squatting / tucked:     foot XY ≈ 0.0-0.2 m of pelvis         -> high reward
+    Standing:               foot XY ≈ 0.1 m of pelvis              -> high reward
+
+  std controls the gradient width. With std=0.30 m the Gaussian is nearly zero
+  when feet are 0.6+ m from the pelvis, so the robot receives no guidance for
+  the initial portion of the knee-tuck. With std=0.45 m the gradient is
+  meaningful from the start of the tuck motion:
+    foot at 0.70 m: exp(-2.44) ≈ 0.087  (vs. exp(-5.44) ≈ 0.004 at std=0.30)
+    foot at 0.30 m: exp(-0.44) ≈ 0.644
+    foot at 0.10 m: exp(-0.05) ≈ 0.951
+
+  asset_cfg must have body_names set to the ankle bodies (e.g. left_ankle_roll_link
+  and right_ankle_roll_link for G1), providing the foot world positions.
+
+  Args:
+    height_gate: Minimum pelvis height (m) for the reward to activate.
+      Recommended 0.35 m -- just above prone pelvis height (~0.25 m) so the
+      reward only fires when the robot has raised itself off the floor.
+    std: Gaussian width (m) for the foot-to-pelvis XY distance.
+      Recommended 0.45 m -- provides gradient from the start of the knee-tuck.
+    asset_cfg: Resolved SceneEntityCfg for the ankle/foot bodies (body_names
+      set per robot, two bodies -- left and right).
+  """
+  asset = env.scene[asset_cfg.name]
+  origins = env.scene.env_origins                                   # (B, 3)
+
+  # Pelvis height gate.
+  pelvis_z = asset.data.root_link_pos_w[:, 2] - origins[:, 2]      # (B,)
+  gate = (pelvis_z > height_gate).float()                           # (B,)
+
+  # Pelvis XY position (reference point).
+  pelvis_xy = asset.data.root_link_pos_w[:, :2]                    # (B, 2)
+
+  # Foot XY positions: (B, 2_feet, 2).
+  foot_xy = asset.data.body_link_pos_w[:, asset_cfg.body_ids, :2]  # (B, 2, 2)
+
+  # Horizontal distance from each foot to the pelvis.
+  diff = foot_xy - pelvis_xy.unsqueeze(1)                          # (B, 2, 2)
+  dist_sq_xy = (diff ** 2).sum(dim=-1)                             # (B, 2)
+
+  # Gaussian reward peaking when foot is directly under pelvis.
+  proximity = torch.exp(-dist_sq_xy / std**2)                      # (B, 2)
+
+  return proximity.mean(dim=1) * gate                              # (B,)
+
+
 def arm_reach_down(
   env: ManagerBasedRlEnv,
   height_gate: float,
+  flat_gate_threshold: float = -0.7,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
   """Reward the hands being close to ground level when the robot is flat.
@@ -232,9 +351,11 @@ def arm_reach_down(
   # Height gate: suppress when hand is already near or above standing height.
   height_gate_mask = (hand_pos_z < height_gate).float()  # (B, 2)
 
-  # Orientation gate: only reward when flat (not yet upright).
+  # Orientation gate: only reward when flat or partially tilted (not when upright).
+  # flat_gate_threshold=-0.85 extends arm support through the sit-to-stand phase
+  # (robot is ~31° from upright) rather than cutting off at -0.7 (45°).
   proj_gz = asset.data.projected_gravity_b[:, 2]
-  flat_gate = (proj_gz > -0.7).float().unsqueeze(1)  # (B, 1)
+  flat_gate = (proj_gz > flat_gate_threshold).float().unsqueeze(1)  # (B, 1)
 
   return (hand_ground_proximity * height_gate_mask * flat_gate).mean(dim=1)  # (B,)
 
@@ -283,6 +404,7 @@ def elbow_push_from_ground(
   sensor_name: str,
   height_gate: float,
   max_vel: float,
+  flat_gate_threshold: float = -0.7,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
   """Reward elbow going up ONLY when that arm is simultaneously on the ground.
@@ -330,9 +452,11 @@ def elbow_push_from_ground(
   # Height gate: suppress once elbow is above mid-recovery height.
   height_gate_mask = (elbow_pos_z < height_gate).float()  # (B, 2)
 
-  # Orientation gate: only reward when robot is sufficiently flat.
+  # Orientation gate: active when robot is sufficiently flat/tilted.
+  # flat_gate_threshold=-0.85 keeps arm support active through the sit-to-stand
+  # transition phase (31° from upright), not just during flat recovery (45°).
   proj_gz = asset.data.projected_gravity_b[:, 2]
-  flat_gate = (proj_gz > -0.7).float().unsqueeze(1)  # (B, 1)
+  flat_gate = (proj_gz > flat_gate_threshold).float().unsqueeze(1)  # (B, 1)
 
   # Critical: elbow velocity reward ONLY fires when that arm is on the ground.
   return (

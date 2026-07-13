@@ -4,13 +4,13 @@ The core new event is ``reset_to_fallen_or_bent_pose``, which extends v3's
 ``reset_to_bent_pose`` with two completely fallen orientations (supine, prone)
 so the robot learns to stand up from the most common ground-level positions.
 
-Six templates are sampled uniformly each episode (67 % bent, 33 % fallen):
-  Fallen (33 %)                  Bent-upright (67 %)
-  ─────────────────────────────  ────────────────────────────────────────────
-  supine     (on back, face up)  home        (default standing, small bends)
-  prone      (face down)         knees_bent  (moderate squat)
-                                 squat       (deep knee bend)
-                                 deep_squat  (maximum knee bend)
+Eight templates are sampled uniformly each episode (25 % fallen, 25 % sitting, 50 % bent):
+  Fallen (25 %)                  Sitting-up (25 %)                 Bent-upright (50 %)
+  ─────────────────────────────  ───────────────────────────────── ──────────────────────────────────────────
+  supine     (on back, face up)  sitting_low  (40° backward lean)  home        (default standing, small bends)
+  prone      (face down)         sitting_high (30° backward lean)  knees_bent  (moderate squat)
+                                                                    squat       (deep knee bend)
+                                                                    deep_squat  (maximum knee bend)
 
 Sampling ratio rationale
 ────────────────────────
@@ -21,10 +21,12 @@ scalar std cannot accommodate both simultaneously.  At std=0.3 (the collapsed
 value after 17 k iters) the policy was simultaneously too timid for floor
 recovery and too noisy for balance maintenance.
 
-Reducing fallen fraction to 33 % lets the policy first stabilise the standing
+Reducing fallen fraction to 25 % lets the policy first stabilise the standing
 skill (where the reward is high and the gradient is clear), then generalise to
-floor recovery.  Side-lying poses (side_left, side_right) are deferred to
-recovery_v2 once the supine/prone recovery is reliable.
+floor recovery.  The two sitting-up templates (25 %) give the policy direct
+experience of the sit-to-stand transition without requiring it to first discover
+the full push-up sequence.  Side-lying poses (side_left, side_right) are
+deferred to recovery_v2 once the supine/prone recovery is reliable.
 
 Fallen templates set the pelvis height to 0.25 m and apply a random world-
 frame yaw so the robot faces a different direction every episode.  Bent
@@ -65,6 +67,10 @@ _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 # ──────────────────────────────────────────────────────────────────────────────
 _SIN45 = math.sin(math.pi / 4)
 _COS45 = math.cos(math.pi / 4)
+_SIN20 = math.sin(math.radians(20))  # half-angle for 40° backward lean
+_COS20 = math.cos(math.radians(20))
+_SIN15 = math.sin(math.radians(15))  # half-angle for 30° backward lean
+_COS15 = math.cos(math.radians(15))
 
 FALLEN_POSE_CONFIGS: list[dict] = [
   {
@@ -89,6 +95,38 @@ FALLEN_POSE_CONFIGS: list[dict] = [
   },
 ]
 
+# ── Sitting-up pose templates ──────────────────────────────────────────────────
+# These templates initialise the robot in a partial sit-up orientation, giving
+# the policy DIRECT experience of the sit-to-stand phase without requiring it to
+# first succeed at the full push-up sequence.
+#
+# Both use type="fallen" so the existing reset logic applies:
+#   tilt quaternion + random world-frame yaw + ±0.6 rad joint perturbation.
+# The joint perturbation gives a diverse set of arm/leg positions to explore from.
+#
+# sitting_low  — 40° backward lean (proj_gz ≈ -0.77), pelvis at 0.28 m.
+#   Robot is in the classic sit-up position: pelvis near the floor, upper body
+#   raised. Covers the region where orientation_recovery and torso_height_reward
+#   provide the primary upward gradient.
+#
+# sitting_high — 30° backward lean (proj_gz ≈ -0.87), pelvis at 0.38 m.
+#   Pelvis is above the feet_proximity_reward gate (0.35 m), so the policy
+#   immediately receives feet-proximity gradient and can explore the knee-tuck
+#   motion. Covers the transition region between sit-up and squat.
+# ──────────────────────────────────────────────────────────────────────────────
+SITTING_POSE_CONFIGS: list[dict] = [
+  {
+    "label": "sitting_low",
+    "base_z": 0.28,
+    "quat_wxyz": [_COS20, 0.0, -_SIN20, 0.0],   # 40° backward lean around -Y
+  },
+  {
+    "label": "sitting_high",
+    "base_z": 0.38,
+    "quat_wxyz": [_COS15, 0.0, -_SIN15, 0.0],   # 30° backward lean; pelvis above feet_proximity gate (0.35 m)
+  },
+]
+
 # ── Bent-upright pose templates (same as v3, FK-verified) ─────────────────────
 BENT_POSE_CONFIGS: list[dict] = [
   {"knee": 0.300, "hip_pitch": -0.100, "ankle": -0.200, "base_z": 0.8000},
@@ -97,11 +135,12 @@ BENT_POSE_CONFIGS: list[dict] = [
   {"knee": 1.800, "hip_pitch": -1.000, "ankle": -0.600, "base_z": 0.5616},
 ]
 
-# Unified list for uniform sampling: 2 fallen + 4 bent = 6 templates (33 % / 67 %).
-# Only supine and prone: the two most common and most critical falls.
+# Unified list: 2 fallen (supine/prone) + 2 sitting + 4 bent = 8 templates (25 / 25 / 50 %).
 # Side-lying templates are deferred to recovery_v2.
 ALL_POSE_CONFIGS: list[dict] = [
-  {**cfg, "type": "fallen"} for cfg in FALLEN_POSE_CONFIGS[:2]   # supine, prone only
+  {**cfg, "type": "fallen"} for cfg in FALLEN_POSE_CONFIGS[:2]       # supine, prone
+] + [
+  {**cfg, "type": "fallen"} for cfg in SITTING_POSE_CONFIGS          # sitting-up states
 ] + [
   {**cfg, "type": "bent"}   for cfg in BENT_POSE_CONFIGS
 ]

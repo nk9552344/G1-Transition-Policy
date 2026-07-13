@@ -7,11 +7,16 @@ configurations introduced in v3.
 Key additions over v3
 ---------------------
 Initial states
-  Six templates sampled uniformly each episode (2 fallen, 33% + 4 bent, 67%):
-    Fallen:  supine, prone                         (base_z ~= 0.25 m)
-    Bent:    home, knees_bent, squat, deep_squat   (FK-verified heights)
+  Eight templates sampled uniformly each episode (2 fallen + 2 sitting + 4 bent = 25/25/50%):
+    Fallen:   supine, prone                          (base_z ~= 0.25 m)
+    Sitting:  sitting_low (40° lean), sitting_high (30° lean)  (base_z 0.28–0.38 m)
+    Bent:     home, knees_bent, squat, deep_squat   (FK-verified heights)
 
-  The 67/33 split matters: 50% fallen caused complete training failure at
+  The sitting templates give the policy direct experience of the sit-to-stand
+  phase without requiring it to first discover the full push-up sequence. They
+  use the "fallen" type in the reset function (tilt quaternion + random joints).
+
+  The 50% bent fraction matters: 50% fallen caused complete training failure at
   17k iters because conflicting gradient signals (large actions for recovery,
   near-zero for balance) collapsed the single scalar std to 0.3 -- simultaneously
   too small for floor recovery and too large for standing stability.
@@ -33,18 +38,20 @@ Termination: height-gated fell_over (replaces the deleted termination)
       that tip sideways are penalised.
 
 Reward changes (over v3 / v2 inherited set)
-  torso_upward_velocity (+3.0, height_gate=0.90 m, max_vel=1.5)
-    Anti-local-optimum signal. Rewards upward velocity of the CHEST (torso_link),
-    not the pelvis. A leg-bridge maneuver lifts the pelvis but keeps the chest
-    on the floor -- yielding zero reward. Only arm-coordinated recovery (push-ups,
-    rolling) that raises the chest generates positive reward. This breaks the
-    leg-only local optimum that forms with upward_base_velocity.
+  torso_height_reward (+3.0, target=0.90 m, std=0.50 m)
+    Anti-oscillation anti-local-optimum signal. Position-based reward on the
+    CHEST (torso_link) height. The robot cannot farm this reward by oscillating
+    its waist -- oscillation earns only the reward at the mean height. The only
+    way to earn significantly more is to SUSTAIN a higher torso position, which
+    requires arm support from the floor.
 
-  orientation_rate (+1.5)
-    Immediate per-step gradient toward upright. Rewards the angular velocity
-    component that analytically decreases proj_gz (rotating from flat to upright).
-    Provides a signal before the static orientation_recovery can respond, speeding
-    up discovery of the flip/roll motion.
+    Replaced torso_upward_velocity (velocity-based, max(0, v_z)) which was
+    gameable by waist oscillation: the upward half-cycle earned reward, the
+    downward half earned 0 -- net positive over full cycle.
+
+    Replaced orientation_rate (+1.5, max(0, d(proj_gz)/dt)) for the same reason:
+    pitch oscillation earned reward on every forward half-cycle. At weight 1.5
+    the oscillation benefit (~0.5-1.0/step) far exceeded the body_ang_vel cost.
 
   orientation_recovery (+3.0, std=1.0)
     Primary get-up signal. Gaussian on (proj_gz + 1.0)^2 -- distinguishes
@@ -107,13 +114,17 @@ def make_recovery_v1_env_cfg():
     func=mdp.reset_to_fallen_or_bent_pose,
     mode="reset",
     params={
-      # Unified list: 2 fallen (supine/prone) + 4 bent = 6 templates (33 / 67 %).
+      # Unified list: 2 fallen + 2 sitting + 4 bent = 8 templates (25 / 25 / 50 %).
       "all_pose_configs": ALL_POSE_CONFIGS,
       # Scatter position (same as v3).
       "xy_pos_range": 0.5,       # +/-0.5 m cell scatter
       "yaw_range": math.pi,      # full 360 deg initial yaw
       # Joint noise for fallen templates (all joints treated equally).
-      "fallen_joint_perturbation": 0.3,  # +/-0.3 rad -- moderate variety
+      # 0.6 rad (was 0.3): G1 push-up shoulder_pitch is ~0.6-0.8 rad above
+      # the default 0.35 rad. At ±0.3 the arm never started in push-up range.
+      # At ±0.6 the arm regularly starts near the position needed to reach the
+      # floor, making the push-up motion discoverable during exploration.
+      "fallen_joint_perturbation": 0.6,  # +/-0.6 rad -- wider arm exploration
       # Joint noise for bent templates (same as v3).
       "leg_perturbation": 0.10,          # +/-0.10 rad on knee/hip/ankle
       "other_perturbation": 0.35,        # +/-0.35 rad on arms/waist
@@ -183,32 +194,39 @@ def make_recovery_v1_env_cfg():
     },
   )
 
-  # -- Add torso_upward_velocity reward (replaces upward_base_velocity) ------
-  # Tracks the CHEST (torso_link) velocity, not the pelvis root.
-  # body_names is left empty here; the G1 config sets it to "torso_link".
-  # height_gate=0.90 m covers flat (torso ~= 0.15 m) through mid-squat
-  # (torso ~= 0.75 m) without firing when fully standing (torso ~= 1.0 m).
-  # max_vel=1.5 m/s reduces wild early-training oscillations vs. the old 2.0 m/s.
-  cfg.rewards["torso_upward_velocity"] = RewardTermCfg(
-    func=mdp.torso_upward_velocity,
+  # -- Add torso_height_reward (replaces torso_upward_velocity) -------------
+  #
+  # torso_upward_velocity was velocity-based: max(0, v_z). Any waist oscillation
+  # that moves the torso upward during the positive half-cycle earns reward,
+  # even if it immediately collapses. The robot discovered it could wiggle its
+  # torso to farm this reward without ever recovering (the "torso wiggling" bug).
+  #
+  # torso_height_reward is position-based: exp(-(torso_z - target)^2 / std^2).
+  # Oscillation earns only the reward at the mean height. The robot MUST hold
+  # its torso at a sustained higher position -- which requires arm support.
+  #
+  # body_names left empty; G1 config sets it to "torso_link".
+  cfg.rewards["torso_height_reward"] = RewardTermCfg(
+    func=mdp.torso_height_reward,
     weight=3.0,
     params={
-      "height_gate": 0.90,   # m -- set relative to torso_link, not pelvis
-      "max_vel": 1.5,        # m/s -- tighter cap reduces wild pelvis swings
+      "target_height": 0.90,  # m -- G1 torso_link when standing ~= 0.88-0.92 m
+      "std": 0.50,            # m -- gradient from 0.15 m (flat) to 0.90 m (upright)
       "asset_cfg": SceneEntityCfg("robot", body_names=()),  # set per-robot
     },
   )
 
-  # -- Add orientation_rate reward -------------------------------------------
-  # Provides immediate gradient for rotational exploration.
-  # Uses root projected_gravity_b and root_link_ang_vel_b -- no body_names needed.
-  cfg.rewards["orientation_rate"] = RewardTermCfg(
-    func=mdp.orientation_rate,
-    weight=1.5,
-    params={
-      "asset_cfg": SceneEntityCfg("robot"),
-    },
-  )
+  # orientation_rate was REMOVED.
+  #
+  # orientation_rate rewarded max(0, d(proj_gz)/dt) -- instantaneous angular
+  # velocity toward upright. Like torso_upward_velocity, this can be farmed by
+  # oscillation: the robot earns reward on every forward-pitch half-cycle and
+  # 0 on the backward half. At weight 1.5 the oscillation benefit (~0.5-1.0/step)
+  # far exceeds the body_ang_vel penalty (~0.12/step). It compounded with
+  # torso_upward_velocity to make waist-wiggling very profitable.
+  #
+  # orientation_recovery (position-based, already registered above) provides the
+  # same gradient toward upright without rewarding transient oscillations.
 
   # ── Arm-based recovery rewards ─────────────────────────────────────────────
   # Two rewards create the push-up gradient chain:
@@ -234,11 +252,14 @@ def make_recovery_v1_env_cfg():
   # so they do not interfere with the standing-balance regime.
 
   # Dense: pull hands to floor (body_names set per-robot to wrist_yaw_link bodies).
+  # flat_gate_threshold=-0.85 keeps arm guidance active through the sit-to-stand
+  # transition (31° from upright), extending past the old -0.7 cutoff (45°).
   cfg.rewards["arm_reach_down"] = RewardTermCfg(
     func=mdp.arm_reach_down,
     weight=1.5,
     params={
-      "height_gate": 0.60,   # m -- suppress once hand is above mid-recovery height
+      "height_gate": 0.60,             # m -- suppress once hand is above mid-recovery
+      "flat_gate_threshold": -0.85,    # extended: active until 31° from upright
       "asset_cfg": SceneEntityCfg("robot", body_names=()),  # set per-robot
     },
   )
@@ -253,6 +274,46 @@ def make_recovery_v1_env_cfg():
       "sensor_name": "arm_ground_contact",   # sensor added in robot config
       "height_gate": 0.70,   # m -- covers flat (elbow ~= 0.15 m) through mid-recovery
       "max_vel": 1.5,
+      "flat_gate_threshold": -0.85,    # extended: matches arm_reach_down
+      "asset_cfg": SceneEntityCfg("robot", body_names=()),  # set per-robot
+    },
+  )
+
+  # -- Stand-up phase rewards ------------------------------------------------
+  # Two rewards guide the sit-to-stand transition after the upper body is raised.
+  #
+  # head_height_reward: The head (geom inside torso_link at +0.43 m local Z)
+  #   is at ~0.90 m when sitting up at 45° but at ~1.33 m when standing.
+  #   This sharper gradient than torso alone motivates the robot to actually
+  #   STAND rather than stay in the seated-with-upper-body-raised local optimum.
+  #   head_z ≈ torso_z + 0.43 × (-proj_gz) -- computed analytically.
+  #   body_names left empty; G1 config sets it to "torso_link".
+  cfg.rewards["head_height_reward"] = RewardTermCfg(
+    func=mdp.head_height_reward,
+    weight=2.0,
+    params={
+      "target_height": 1.30,   # m -- G1 standing head ~= 1.30-1.35 m
+      "std": 0.60,             # m -- gradient from 0.15 m (flat) to 1.35 m (upright)
+      "head_offset": 0.43,     # m -- G1 head geom center above torso_link origin
+      "asset_cfg": SceneEntityCfg("robot", body_names=()),  # set per-robot
+    },
+  )
+
+  # feet_proximity_reward: when pelvis is elevated (upper body raised), reward
+  #   feet being horizontally close to the pelvis. This guides the knee-tuck-
+  #   and-stand maneuver: legs extended forward in sitting position give ~0.6 m
+  #   foot-to-pelvis XY distance; feet under body in squat give ~0.1-0.2 m.
+  #   body_names left empty; G1 config sets it to ankle_roll_link bodies.
+  cfg.rewards["feet_proximity_reward"] = RewardTermCfg(
+    func=mdp.feet_proximity_reward,
+    weight=2.0,
+    params={
+      "height_gate": 0.35,   # m -- activate once pelvis is above prone height
+      # std=0.45 (widened from 0.30): the narrower Gaussian gives near-zero
+      # gradient when feet are 0.6+ m from pelvis (typical sit-up distance),
+      # leaving the robot with no signal for the first ~0.3 m of the knee-tuck.
+      # 0.45 m provides a meaningful gradient from the very start of the tuck.
+      "std": 0.45,
       "asset_cfg": SceneEntityCfg("robot", body_names=()),  # set per-robot
     },
   )
