@@ -4,13 +4,14 @@ The core new event is ``reset_to_fallen_or_bent_pose``, which extends v3's
 ``reset_to_bent_pose`` with two completely fallen orientations (supine, prone)
 so the robot learns to stand up from the most common ground-level positions.
 
-Eight templates are sampled uniformly each episode (25 % fallen, 25 % sitting, 50 % bent):
-  Fallen (25 %)                  Sitting-up (25 %)                 Bent-upright (50 %)
+Nine templates are sampled uniformly each episode (22 % fallen, 22 % sitting, 11 % squat-lean, 44 % bent):
+  Fallen (22 %)                  Sitting-up (22 %)                 Bent-upright (44 %)
   ─────────────────────────────  ───────────────────────────────── ──────────────────────────────────────────
   supine     (on back, face up)  sitting_low  (40° backward lean)  home        (default standing, small bends)
   prone      (face down)         sitting_high (30° backward lean)  knees_bent  (moderate squat)
                                                                     squat       (deep knee bend)
                                                                     deep_squat  (maximum knee bend)
+  Squat-lean (11 %): squat_lean — 20° lean, knee=1.2 rad, pelvis 0.52 m  (sit-to-stand transition zone)
 
 Sampling ratio rationale
 ────────────────────────
@@ -21,12 +22,14 @@ scalar std cannot accommodate both simultaneously.  At std=0.3 (the collapsed
 value after 17 k iters) the policy was simultaneously too timid for floor
 recovery and too noisy for balance maintenance.
 
-Reducing fallen fraction to 25 % lets the policy first stabilise the standing
+Reducing fallen fraction to 22 % lets the policy first stabilise the standing
 skill (where the reward is high and the gradient is clear), then generalise to
-floor recovery.  The two sitting-up templates (25 %) give the policy direct
+floor recovery.  The two sitting-up templates (22 %) give the policy direct
 experience of the sit-to-stand transition without requiring it to first discover
-the full push-up sequence.  Side-lying poses (side_left, side_right) are
-deferred to recovery_v2 once the supine/prone recovery is reliable.
+the full push-up sequence.  The squat_lean template (11 %) covers the transition
+zone that exploration from a sitting start rarely reaches: 20° lean + knee=1.2 rad
++ pelvis at 0.52 m, exactly where shank_orientation_reward provides its strongest
+gradient toward standing.  Side-lying poses are deferred to recovery_v2.
 
 Fallen templates set the pelvis height to 0.25 m and apply a random world-
 frame yaw so the robot faces a different direction every episode.  Bent
@@ -71,6 +74,8 @@ _SIN20 = math.sin(math.radians(20))  # half-angle for 40° backward lean
 _COS20 = math.cos(math.radians(20))
 _SIN15 = math.sin(math.radians(15))  # half-angle for 30° backward lean
 _COS15 = math.cos(math.radians(15))
+_SIN10 = math.sin(math.radians(10))  # half-angle for 20° lean (squat_lean templates)
+_COS10 = math.cos(math.radians(10))
 
 FALLEN_POSE_CONFIGS: list[dict] = [
   {
@@ -135,14 +140,36 @@ BENT_POSE_CONFIGS: list[dict] = [
   {"knee": 1.800, "hip_pitch": -1.000, "ankle": -0.600, "base_z": 0.5616},
 ]
 
-# Unified list: 2 fallen (supine/prone) + 2 sitting + 4 bent = 8 templates (25 / 25 / 50 %).
+# ── Squat-lean pose templates ───────────────────────────────────────────────────
+# Starting state in the sit-to-stand transition zone: pelvis elevated (0.52 m),
+# knees deeply bent (1.2 rad), slight backward lean (20°). Exploration from
+# sitting templates rarely reaches this configuration because it requires
+# coordinated knee-bend + lean reduction, yet this is exactly where
+# shank_orientation_reward gives the strongest gradient toward standing.
+# type="squat_lean": uses bent-style leg-joint targeting PLUS fallen-style tilt
+# quaternion (override applied in the is_squat_lean block of the reset function).
+# ──────────────────────────────────────────────────────────────────────────────
+SQUAT_LEAN_CONFIGS: list[dict] = [
+  {
+    "label": "squat_lean",
+    "base_z": 0.52,
+    "quat_wxyz": [_COS10, 0.0, -_SIN10, 0.0],   # 20° backward lean
+    "knee": 1.20,
+    "hip_pitch": -0.60,
+    "ankle": -0.40,
+  },
+]
+
+# Unified list: 2 fallen + 2 sitting + 1 squat_lean + 4 bent = 9 templates (22 / 22 / 11 / 44 %).
 # Side-lying templates are deferred to recovery_v2.
 ALL_POSE_CONFIGS: list[dict] = [
-  {**cfg, "type": "fallen"} for cfg in FALLEN_POSE_CONFIGS[:2]       # supine, prone
+  {**cfg, "type": "fallen"}     for cfg in FALLEN_POSE_CONFIGS[:2]    # supine, prone
 ] + [
-  {**cfg, "type": "fallen"} for cfg in SITTING_POSE_CONFIGS          # sitting-up states
+  {**cfg, "type": "fallen"}     for cfg in SITTING_POSE_CONFIGS       # sitting-up states
 ] + [
-  {**cfg, "type": "bent"}   for cfg in BENT_POSE_CONFIGS
+  {**cfg, "type": "squat_lean"} for cfg in SQUAT_LEAN_CONFIGS         # lean + knees-bent transition
+] + [
+  {**cfg, "type": "bent"}       for cfg in BENT_POSE_CONFIGS
 ]
 
 
@@ -168,7 +195,9 @@ def reset_to_fallen_or_bent_pose(
   Samples uniformly from ``all_pose_configs``.  Templates marked "fallen"
   set the robot flat on the ground with a random world-frame yaw.  Templates
   marked "bent" use the v3 logic: upright orientation + random yaw + leg-joint
-  targeting.
+  targeting.  Templates marked "squat_lean" combine both: bent-style leg-joint
+  targeting (knee/hip/ankle from template) plus fallen-style tilt quaternion,
+  placing the robot in the mid-recovery transition zone (lean + knees bent).
 
   For fallen templates:
     1. Set pelvis z to template's base_z (safe drop height).
@@ -333,6 +362,27 @@ def reset_to_fallen_or_bent_pose(
     # World-frame yaw: left-multiply (applied after tilt).
     fallen_orient = quat_mul(yaw_quat, fallen_quat_table)  # (N, 4)
     orientation[is_fallen] = fallen_orient[is_fallen]
+
+  # --- Squat-lean orientations: tilt quaternion overrides upright from bent block -
+  # squat_lean type is NOT is_fallen, so the ~is_fallen branch wrote upright
+  # orientation for these envs first. Override here with the template's tilt
+  # quaternion. Leg joints are already correct: the ~is_fallen branch reads
+  # "knee"/"hip_pitch"/"ankle" from the config dict and sets them via _set_leg_joints.
+  is_squat_lean = torch.tensor(
+    [all_pose_configs[i]["type"] == "squat_lean" for i in range(len(all_pose_configs))],
+    device=device,
+    dtype=torch.bool,
+  )[template_idx]
+
+  if is_squat_lean.any():
+    squat_lean_quat_table = torch.tensor(
+      [
+        all_pose_configs[i].get("quat_wxyz", [1.0, 0.0, 0.0, 0.0])
+        for i in range(len(all_pose_configs))
+      ],
+      dtype=torch.float32, device=device,
+    )[template_idx]
+    orientation[is_squat_lean] = quat_mul(yaw_quat, squat_lean_quat_table)[is_squat_lean]
 
   # --- Velocities ----------------------------------------------------------
   lin_vel = torch.zeros(n, 3, device=device)

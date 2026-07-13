@@ -492,3 +492,130 @@ def pose_convergence_gated(
   upright_weight = (-proj_gz).clamp(0.0, 1.0)     # [B]: 0 when flat, 1 when upright
 
   return torch.exp(-mse / std**2) * upright_weight
+
+
+def shank_orientation_reward(
+  env: ManagerBasedRlEnv,
+  height_gate: float,
+  std: float = 0.50,
+  knee_asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+  ankle_asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Reward the shanks (knee-to-ankle) pointing straight down — the key anti-sitting signal.
+
+  In the sit-up position with legs extended forward the shank runs at 30-50°
+  from vertical (cosine ≈ 0.6–0.7). Standing or squatting requires the shank to
+  be nearly vertical (cosine ≈ 1.0). This reward therefore creates a direct
+  gradient from the sitting local optimum toward the knee-tuck-and-stand motion
+  that is completely absent from the position-based height rewards.
+
+  Physical check (std=0.50):
+    Sitting, legs forward on floor: shank cosine ≈ 0.55–0.70 → exp(-0.81 to -0.36) ≈ 0.44–0.70
+    Squat, feet under body:         ankle directly below knee → cosine = 1.0 → 1.0
+    Standing:                        same geometry             → cosine = 1.0 → 1.0
+
+  Gated off when pelvis is below height_gate so the reward does not interfere
+  during the flat push-up phase (shanks on floor = horizontal, which is correct
+  behaviour at that stage).
+
+  knee_asset_cfg.body_ids  must resolve to 2 bodies: [left_knee, right_knee].
+  ankle_asset_cfg.body_ids must resolve to 2 bodies: [left_ankle, right_ankle],
+  in the same left/right order.
+
+  Args:
+    height_gate: Minimum pelvis height (m) for the reward to activate.
+      Recommended 0.30 m — activates once the pelvis clears the floor but
+      before the full sit-up phase, so the policy starts receiving the signal
+      early in the recovery trajectory.
+    std: Gaussian width on (shank_cosine − 1). std=0.50 gives:
+      cosine=0 (horizontal): exp(-4.0) ≈ 0.02;  cosine=0.5: exp(-1.0) ≈ 0.37;
+      cosine=0.7: exp(-0.36) ≈ 0.70;  cosine=0.9: exp(-0.08) ≈ 0.92;  cosine=1.0: 1.0.
+      Wider than 0.30 so the sitting range (cosine 0.55–0.70) receives a clear
+      gradient signal rather than near-zero values (std=0.30 gave ≈ 0.06 there).
+    knee_asset_cfg:  SceneEntityCfg with 2 body_ids (left and right knee links).
+    ankle_asset_cfg: SceneEntityCfg with 2 body_ids (left and right ankle roll links).
+  """
+  asset = env.scene[knee_asset_cfg.name]
+
+  knee_pos  = asset.data.body_link_pos_w[:, knee_asset_cfg.body_ids,  :]  # (B, 2, 3)
+  ankle_pos = asset.data.body_link_pos_w[:, ankle_asset_cfg.body_ids, :]  # (B, 2, 3)
+
+  shank_vec    = ankle_pos - knee_pos                                   # (B, 2, 3): knee→ankle
+  shank_len    = ((shank_vec ** 2).sum(dim=-1)).sqrt().clamp(min=1e-6)  # (B, 2)
+  shank_unit_z = shank_vec[:, :, 2] / shank_len                        # (B, 2)
+
+  # Vertical cosine: +1 when shank points straight down (ankle directly below knee).
+  # 0 when horizontal, negative when inverted (impossible in normal poses).
+  shank_cosine = -shank_unit_z                                         # (B, 2)
+
+  # Gaussian: peaks at cosine=1 (vertical), near-zero at cosine=0 (horizontal).
+  dist_sq = torch.square(shank_cosine - 1.0)
+  reward  = torch.exp(-dist_sq / std**2).mean(dim=1)                   # (B,)
+
+  # Height gate: suppress during the flat push-up phase.
+  origins_z = env.scene.env_origins[:, 2]
+  pelvis_z  = asset.data.root_link_pos_w[:, 2] - origins_z             # (B,)
+  gate      = (pelvis_z > height_gate).float()                         # (B,)
+
+  return reward * gate
+
+
+def head_above_feet_reward(
+  env: ManagerBasedRlEnv,
+  target_height: float,
+  std: float,
+  head_offset: float = 0.43,
+  torso_asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+  foot_asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Reward the head being target_height ABOVE the average foot height.
+
+  Unlike head_height_reward (which uses an absolute world Z target), this reward
+  measures head height RELATIVE to the feet. This is the approach used by HoST
+  and has two key advantages:
+
+  1. Sharper sitting-vs-standing distinction:
+       Sit-up: head at ~0.93 m, feet at ~0.05 m → head above feet ≈ 0.88 m
+       Standing: head at ~1.33 m, feet at ~0.05 m → head above feet ≈ 1.28 m
+     The 0.40 m gap is 67% larger than the absolute gap (0.40 vs 0.40 m), and
+     with std=0.25 m the rewards differ by 2.5× instead of 1.5× for absolute.
+
+  2. Terrain-agnostic: on sloped terrain the relative height stays meaningful
+     even as absolute head and foot heights both shift.
+
+  head_z ≈ torso_z + head_offset × (−proj_gz), same approximation as head_height_reward.
+  foot_z is the mean of the two ankle body world heights.
+
+  torso_asset_cfg.body_ids: 1 body (e.g. torso_link).
+  foot_asset_cfg.body_ids:  2 bodies (e.g. left_ankle_roll_link, right_ankle_roll_link).
+
+  Args:
+    target_height: Target head-above-feet height (m).
+      G1 standing: head ~1.28 m above feet. Recommended 1.15 m — gives max
+      reward when upright without requiring perfect posture.
+    std: Gaussian width (m). 0.25 m produces:
+      Sitting (0.88 m above feet): exp(-1.17) ≈ 0.31
+      Standing (1.28 m above feet): exp(-0.27) ≈ 0.76
+      A 2.5× difference vs the 1.5× at the absolute height formulation.
+    head_offset: Head geom center height above torso_link origin (m). G1 = 0.43 m.
+    torso_asset_cfg: SceneEntityCfg for the torso body (body_names set per robot).
+    foot_asset_cfg:  SceneEntityCfg for the foot bodies (body_names set per robot,
+      two bodies — left and right ankle roll links).
+  """
+  asset     = env.scene[torso_asset_cfg.name]
+  origins_z = env.scene.env_origins[:, 2]                               # (B,)
+
+  torso_z = (
+    asset.data.body_link_pos_w[:, torso_asset_cfg.body_ids, 2].squeeze(1) - origins_z
+  )  # (B,)
+  proj_gz = asset.data.projected_gravity_b[:, 2]                        # (B,)
+  head_z  = torso_z + head_offset * (-proj_gz)                          # (B,)
+
+  # Average foot Z (both ankles), relative to terrain.
+  foot_z  = (
+    asset.data.body_link_pos_w[:, foot_asset_cfg.body_ids, 2].mean(dim=1) - origins_z
+  )  # (B,)
+
+  head_above_feet = head_z - foot_z                                     # (B,)
+  dist_sq = torch.square(head_above_feet - target_height)
+  return torch.exp(-dist_sq / std**2)

@@ -121,8 +121,24 @@ def unitree_g1_recovery_v1_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   )
 
   # G1 stand-up phase reward body references.
-  # head_height_reward uses torso_link (head geom is inside torso_link at +0.43 m).
-  cfg.rewards["head_height_reward"].params["asset_cfg"].body_names = ("torso_link",)
+  #
+  # shank_orientation_reward: shank = knee_link → ankle_roll_link segment.
+  cfg.rewards["shank_orientation_reward"].params["knee_asset_cfg"].body_names = (
+    "left_knee_link",
+    "right_knee_link",
+  )
+  cfg.rewards["shank_orientation_reward"].params["ankle_asset_cfg"].body_names = (
+    "left_ankle_roll_link",
+    "right_ankle_roll_link",
+  )
+  #
+  # head_above_feet_reward: head estimated from torso_link; feet from ankle_roll_links.
+  cfg.rewards["head_above_feet_reward"].params["torso_asset_cfg"].body_names = ("torso_link",)
+  cfg.rewards["head_above_feet_reward"].params["foot_asset_cfg"].body_names = (
+    "left_ankle_roll_link",
+    "right_ankle_roll_link",
+  )
+  #
   # feet_proximity_reward tracks ankle_roll_link as foot proxies.
   cfg.rewards["feet_proximity_reward"].params["asset_cfg"].body_names = (
     "left_ankle_roll_link",

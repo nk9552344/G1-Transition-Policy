@@ -7,10 +7,11 @@ configurations introduced in v3.
 Key additions over v3
 ---------------------
 Initial states
-  Eight templates sampled uniformly each episode (2 fallen + 2 sitting + 4 bent = 25/25/50%):
-    Fallen:   supine, prone                          (base_z ~= 0.25 m)
-    Sitting:  sitting_low (40° lean), sitting_high (30° lean)  (base_z 0.28–0.38 m)
-    Bent:     home, knees_bent, squat, deep_squat   (FK-verified heights)
+  Nine templates sampled uniformly each episode (2 fallen + 2 sitting + 1 squat_lean + 4 bent = 22/22/11/44%):
+    Fallen:     supine, prone                          (base_z ~= 0.25 m)
+    Sitting:    sitting_low (40° lean), sitting_high (30° lean)  (base_z 0.28–0.38 m)
+    Squat-lean: squat_lean (20° lean, knee=1.2 rad)   (base_z ~= 0.52 m, transition zone)
+    Bent:       home, knees_bent, squat, deep_squat   (FK-verified heights)
 
   The sitting templates give the policy direct experience of the sit-to-stand
   phase without requiring it to first discover the full push-up sequence. They
@@ -114,7 +115,7 @@ def make_recovery_v1_env_cfg():
     func=mdp.reset_to_fallen_or_bent_pose,
     mode="reset",
     params={
-      # Unified list: 2 fallen + 2 sitting + 4 bent = 8 templates (25 / 25 / 50 %).
+      # Unified list: 2 fallen + 2 sitting + 1 squat_lean + 4 bent = 9 templates (22 / 22 / 11 / 44 %).
       "all_pose_configs": ALL_POSE_CONFIGS,
       # Scatter position (same as v3).
       "xy_pos_range": 0.5,       # +/-0.5 m cell scatter
@@ -280,22 +281,42 @@ def make_recovery_v1_env_cfg():
   )
 
   # -- Stand-up phase rewards ------------------------------------------------
-  # Two rewards guide the sit-to-stand transition after the upper body is raised.
+  # Three rewards guide the sit-to-stand transition after the upper body is raised.
   #
-  # head_height_reward: The head (geom inside torso_link at +0.43 m local Z)
-  #   is at ~0.90 m when sitting up at 45° but at ~1.33 m when standing.
-  #   This sharper gradient than torso alone motivates the robot to actually
-  #   STAND rather than stay in the seated-with-upper-body-raised local optimum.
-  #   head_z ≈ torso_z + 0.43 × (-proj_gz) -- computed analytically.
-  #   body_names left empty; G1 config sets it to "torso_link".
-  cfg.rewards["head_height_reward"] = RewardTermCfg(
-    func=mdp.head_height_reward,
-    weight=2.0,
+  # shank_orientation_reward (+3.5): The primary anti-sitting signal.
+  #   In sitting with legs extended, the shank (knee→ankle) runs at ~30–50° from
+  #   vertical (cosine ≈ 0.6–0.7). Standing / squatting requires the shank to be
+  #   vertical (cosine ≈ 1.0). Inspired by HoST (InternRobotics), which uses
+  #   this as a core style reward with scale=10. Gated at pelvis > 0.30 m.
+  #   Sitting local optimum earns ~0.44 × 3.5 = +1.55/step here vs +3.5 standing.
+  #   body_names left empty; G1 config sets knee_asset_cfg and ankle_asset_cfg.
+  cfg.rewards["shank_orientation_reward"] = RewardTermCfg(
+    func=mdp.shank_orientation_reward,
+    weight=3.5,
     params={
-      "target_height": 1.30,   # m -- G1 standing head ~= 1.30-1.35 m
-      "std": 0.60,             # m -- gradient from 0.15 m (flat) to 1.35 m (upright)
-      "head_offset": 0.43,     # m -- G1 head geom center above torso_link origin
-      "asset_cfg": SceneEntityCfg("robot", body_names=()),  # set per-robot
+      "height_gate": 0.30,                                           # m -- active from floor clearance
+      "std": 0.50,                                                   # wider than 0.30 for clear gradient at sitting range
+      "knee_asset_cfg":  SceneEntityCfg("robot", body_names=()),     # set per-robot
+      "ankle_asset_cfg": SceneEntityCfg("robot", body_names=()),     # set per-robot
+    },
+  )
+
+  # head_above_feet_reward (+2.5): Measures head height relative to feet, not
+  #   absolute world Z. Approach from HoST: head must be target_height above
+  #   the average ankle height, which is only achievable when fully standing.
+  #   Sitting: head ≈ 0.88 m above feet → exp(-1.17) × 2.5 = +0.77.
+  #   Standing: head ≈ 1.28 m above feet → exp(-0.27) × 2.5 = +1.90.
+  #   2.5× ratio vs 1.5× for the previous absolute head_height_reward.
+  #   body_names left empty; G1 config sets torso_asset_cfg and foot_asset_cfg.
+  cfg.rewards["head_above_feet_reward"] = RewardTermCfg(
+    func=mdp.head_above_feet_reward,
+    weight=2.5,
+    params={
+      "target_height": 1.15,  # m above feet -- G1 standing ≈ 1.28 m; 1.15 m gives gradient
+      "std": 0.25,            # m -- sharper than 0.60 to distinguish sitting vs standing
+      "head_offset": 0.43,    # m -- G1 head geom center above torso_link origin
+      "torso_asset_cfg": SceneEntityCfg("robot", body_names=()),  # set per-robot
+      "foot_asset_cfg":  SceneEntityCfg("robot", body_names=()),  # set per-robot
     },
   )
 

@@ -36,10 +36,12 @@ from .rewards import (                             # noqa: F401
   arm_reach_down,
   elbow_push_from_ground,
   feet_proximity_reward,
+  head_above_feet_reward,
   head_height_reward,
   height_recovery,
   orientation_recovery,
   pose_convergence_gated,
+  shank_orientation_reward,
   torso_height_reward,
 )
 from .terminations import bad_orientation_while_elevated  # noqa: F401
