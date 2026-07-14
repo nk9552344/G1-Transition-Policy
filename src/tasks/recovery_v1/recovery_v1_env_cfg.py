@@ -13,21 +13,53 @@ Why a clean rewrite?
   boilerplate accumulated across five training iterations.
 
 Task goal
-  Stand up from any fallen ground position (supine, prone, sitting, or
-  partially tucked). Nine initial-state templates cover the full trajectory
-  so every sub-skill gets gradient:
-    Fallen (22 %):     supine, prone                          (base_z ~0.25 m)
-    Sitting (22 %):    sitting_low (40° lean), sitting_high (30° lean)
-    Squat-lean (11 %): squat_lean (20° lean, knee=1.2 rad)   (transition zone)
-    Bent (44 %):       home, knees_bent, squat, deep_squat    (FK-verified)
+  Stand up from any fallen ground position (supine, prone, side-lying,
+  sitting, or partially tucked). Eleven initial-state templates cover the
+  full trajectory so every sub-skill gets gradient:
+    Fallen (36 %):     supine, prone, side_left, side_right  (base_z ~0.25 m)
+    Sitting (18 %):    sitting_low (40° lean), sitting_high (30° lean)
+    Squat-lean (9 %):  squat_lean (20° lean, knee=1.2 rad)  (transition zone)
+    Bent (36 %):       home, knees_bent, squat, deep_squat   (FK-verified)
+
+Reward design — four root causes of previous failure addressed
+──────────────────────────────────────────────────────────────
+Root cause 1 — velocity-based elbow_push_from_ground (REMOVED):
+  Rewarded max(0, elbow_vel_z) × arm_contact every step.  The robot discovers
+  that bouncing elbows on the ground earns reward on every upward half-cycle
+  while in contact.  This causes the observed "bouncing in initial state" and
+  prevents real push-up learning.  Replaced by pushup_support_reward (position-
+  based Gaussian on elbow height).
+
+Root cause 2 — ungated body_ang_vel penalty (REPLACED):
+  body_angular_velocity_penalty had no height gate.  Rolling from supine to
+  prone requires ~1.5 rad/s XY angular velocity.  With weight -0.03 and the
+  GAE discount horizon of ~17 steps, the immediate angular penalty (-0.068/step)
+  outweighed the discounted orientation gain.  Net discounted advantage for
+  rolling was negative → policy learned NOT to roll.  Replaced by
+  height_gated_ang_vel_penalty which is zero below 0.40 m and ramps to full
+  above 0.65 m, allowing rolling while preventing elevated instability.
+
+Root cause 3 — GAE λ=0.95 gives 0.34-second effective horizon (FIXED IN rl_cfg):
+  Floor recovery takes 5–15 seconds.  With λ=0.95, γ=0.99 the effective
+  GAE horizon = 1/(1-γλ) ≈ 17 steps = 0.34 s.  A roll that pays off over
+  50 steps (1 s) has only 4.7 % of its terminal reward credited to the first
+  action.  Increasing λ to 0.97 doubles the horizon to 0.67 s, making multi-
+  second recovery sequences profitable from the first action.  See rl_cfg.py.
+
+Root cause 4 — 44 % upright starts collapse action std (FIXED — now 36 %):
+  PPO uses a scalar std.  Upright balance needs std ≈ 0.1; fallen recovery
+  needs std ≈ 1.5.  44 % upright starts pulled std toward the balance level,
+  making random actions from fallen states too small to initiate rolling or
+  push-ups.  Fallen + sitting now cover 54 % of starts; upright bent is 36 %.
 
 Reward design summary
   Phase 1 — get off the floor:
     orientation_recovery (+3.0): pelvis gravity projection toward upright
     height_recovery (+2.0):      pelvis rising toward 0.78 m
     torso_height_reward (+3.0):  CHEST (not pelvis) rising — breaks leg-bridge
-    arm_reach_down (+1.5):       hands toward floor when flat
-    elbow_push_from_ground (+3.5): push-up only when arm is in contact
+    arm_reach_down (+1.5):       hands toward floor when flat (pre-contact guidance)
+    pushup_support_reward (+4.0): elbow sustained at push-up height while in
+                                   contact (position-based, not farmable by bounce)
   Phase 2 — sit-to-stand:
     shank_orientation_reward (+3.5): shanks vertical (not forward-extended)
     head_above_feet_reward (+2.5):   head 1.15 m above feet (relative, not abs)
@@ -37,24 +69,27 @@ Reward design summary
     hold_bonus (+1.0):               locked-in bonus
     both_feet_contact (+0.2):        both feet on ground
 
-Key design lessons (do not revert):
-  - All position-based (Gaussian). NO velocity-based rewards — they are
-    gameable by oscillation: robot earns reward on every upward half-cycle
-    and zero on the downward half, making waist-wiggling very profitable.
-  - body_ang_vel weight -0.03 (NOT -0.10): recovery requires deliberate
-    body rotation. -0.10 actively fights the roll/flip motion needed to
-    get off the floor.
-  - shank_orientation_reward std=0.50 (NOT 0.30): at std=0.30 the sitting
-    range (cosine 0.55-0.70) gives near-zero reward → PPO can't see the
-    gradient. At 0.50 the same range gives 0.44 → 4× clearer signal.
+  Penalties (reduced for floor recovery, phase-gated where necessary):
+    height_gated_ang_vel   (-0.05, gated 0.40–0.65 m): zero on floor, full elevated
+    angular_momentum       (-0.002, reduced from -0.008): reduced to allow floor roll
+    joint_vel_penalty      (-0.002, reduced from -0.008): reduced for push-up motions
+    joint_acc_l2           (-5e-8,  reduced from -2.5e-7)
+    action_rate_l2         (-0.005, reduced from -0.02):  fast phase transitions allowed
+
+Key design constraints preserved (do not revert):
+  - All position-based (Gaussian) except penalties. NO velocity-based rewards —
+    they are gameable by oscillation.
+  - height_gated_ang_vel zero below 0.40 m: allows rolling/flipping on the floor.
   - fallen_joint_perturbation=0.6: G1 push-up shoulder_pitch is 0.6-0.8 rad
-    above default. At 0.3 rad perturbation the arm never starts near the
-    needed position. At 0.6 it regularly does.
-  - feet_proximity_reward std=0.45: at 0.30 the gradient at 0.60 m
-    (typical sitting foot distance) is near-zero. At 0.45 it is meaningful.
-  - height-gated termination at 0.65 m: the prone→bridge→squat trajectory
-    crosses 0.50 m while still tilted — using 0.50 m created a punishment
-    zone that taught the robot to AVOID raising past 0.50 m.
+    above default. At 0.3 rad the arm never starts near the needed position.
+  - shank_orientation_reward std=0.50: at 0.30 the sitting cosine range gives
+    near-zero reward → PPO can't see the gradient.
+  - feet_proximity_reward std=0.45: meaningful gradient from knee-tuck start.
+  - height-gated termination at 0.65 m: prone→bridge trajectory crosses 0.50 m
+    while tilted; 0.50 m created a zone that punished rising past it.
+  - fallen_lin_vel_range=0.05, fallen_ang_vel_range=0.10, fallen_joint_vel_range=0.05:
+    near-zero initial velocities for fallen states prevent immediate floor
+    bouncing from large velocity perturbations colliding with ground contact.
 """
 
 import math
@@ -88,6 +123,17 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
   # ── Observations ─────────────────────────────────────────────────────────────
   # Actor and critic share the same core terms; critic also receives privileged
   # state (linear velocity, foot contact forces) that is unavailable on hardware.
+  #
+  # Critical actor additions for floor recovery:
+  #   base_height — pelvis height above terrain. Without it, a robot at 0.40 m
+  #     (push-up phase) and one at 0.70 m (near-standing) may have similar
+  #     projected gravity and joint angles but require completely different
+  #     actions. The actor is blind to the phase without explicit height.
+  #   foot_contact — which feet are on the ground. Essential for knowing whether
+  #     to plant feet (standing) or tuck them (recovery). Previously only in
+  #     critic, leaving the actor without phase-detection context.
+  #   arm_contact — which arms are in ground contact. Tells the actor whether
+  #     push-up support is available. Gates correct arm timing for recovery.
   actor_terms = {
     "base_ang_vel": ObservationTermCfg(
       func=mdp.builtin_sensor,
@@ -98,6 +144,10 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
       func=mdp.projected_gravity,
       noise=Unoise(n_min=-0.05, n_max=0.05),
     ),
+    "base_height": ObservationTermCfg(
+      func=mdp.base_height_obs,
+      noise=Unoise(n_min=-0.02, n_max=0.02),
+    ),
     "joint_pos": ObservationTermCfg(
       func=mdp.joint_pos_rel,
       noise=Unoise(n_min=-0.01, n_max=0.01),
@@ -105,6 +155,14 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
     "joint_vel": ObservationTermCfg(
       func=mdp.joint_vel_rel,
       noise=Unoise(n_min=-1.5, n_max=1.5),
+    ),
+    "foot_contact": ObservationTermCfg(
+      func=mdp.foot_contact,
+      params={"sensor_name": "feet_ground_contact"},  # wired per-robot in G1 config
+    ),
+    "arm_contact": ObservationTermCfg(
+      func=mdp.foot_contact,  # same pattern as foot_contact — reads sensor.data.found
+      params={"sensor_name": "arm_ground_contact"},   # wired per-robot in G1 config
     ),
     "actions": ObservationTermCfg(func=mdp.last_action),
   }
@@ -115,10 +173,6 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
       func=mdp.builtin_sensor,
       params={"sensor_name": "robot/imu_lin_vel"},
       noise=Unoise(n_min=-0.5, n_max=0.5),
-    ),
-    "foot_contact": ObservationTermCfg(
-      func=mdp.foot_contact,
-      params={"sensor_name": "feet_ground_contact"},
     ),
     "foot_contact_forces": ObservationTermCfg(
       func=mdp.foot_contact_forces,
@@ -138,33 +192,45 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
 
   # ── Events ────────────────────────────────────────────────────────────────────
   events = {
-    # ── Reset: 9-template curriculum (22% fallen / 22% sitting / 11% squat-lean / 44% bent)
+    # ── Reset: 11-template curriculum
+    #    36 % fallen (supine, prone, side_left, side_right)
+    #    18 % sitting (sitting_low 40°, sitting_high 30°)
+    #     9 % squat-lean (squat_lean 20° lean, knee=1.2 rad)
+    #    36 % bent-upright (home, knees_bent, squat, deep_squat)
+    #
+    # Side-lying added (was deferred): G1 often falls to its side; without
+    # side-lying starts the policy never learns to roll from that position.
+    #
+    # Fallen fraction increased 22 % → 36 %: more fallen starts give the policy
+    # more direct floor-recovery experience and reduce the std-bias toward the
+    # balance skill that dominated at 44 % upright.
     "reset_robot": EventTermCfg(
       func=mdp.reset_to_fallen_or_bent_pose,
       mode="reset",
       params={
         "all_pose_configs": ALL_POSE_CONFIGS,
-        "xy_pos_range": 0.5,        # ±0.5 m XY scatter within env cell
-        "yaw_range": math.pi,       # full 360° random heading
-        # Joint noise for fallen/sitting/squat-lean templates.
-        # 0.6 rad: G1 shoulder_pitch needs to reach 0.6-0.8 rad above default
-        # for push-up position. At ±0.3 the arm never starts near that range.
+        "xy_pos_range": 0.5,
+        "yaw_range": math.pi,
         "fallen_joint_perturbation": 0.6,
-        # Joint noise for bent (upright-squat) templates.
         "leg_perturbation": 0.10,
         "other_perturbation": 0.35,
-        # Initial body/joint velocities.
+        # Fallen-state-specific initial velocities (small to prevent floor bounce).
+        # Large initial velocities cause the body to thrash against ground contact
+        # geometry on the first few steps, generating chaotic forces that look like
+        # reward-positive bouncing to the policy.
+        "fallen_lin_vel_range":   0.05,   # m/s  (was implicitly lin_vel_range=0.20)
+        "fallen_ang_vel_range":   0.10,   # rad/s (was implicitly ang_vel_range=0.30)
+        "fallen_joint_vel_range": 0.05,   # rad/s (was implicitly joint_vel_range=0.15)
+        # Bent/upright-state velocities (unchanged from v1 — robot is already stable).
         "joint_vel_range": 0.15,
         "lin_vel_range":   0.20,
         "ang_vel_range":   0.30,
-        # Leg-joint IDs for bent and squat-lean templates (set per-robot via regex).
         "knee_cfg":      SceneEntityCfg("robot", joint_names=(".*_knee_joint",)),
         "hip_pitch_cfg": SceneEntityCfg("robot", joint_names=(".*_hip_pitch_joint",)),
         "ankle_cfg":     SceneEntityCfg("robot", joint_names=(".*_ankle_pitch_joint",)),
         "asset_cfg":     SceneEntityCfg("robot"),
       },
     ),
-    # ── Disturbance pushes (keep recovery robust to perturbations).
     "push_robot": EventTermCfg(
       func=mdp.push_by_setting_velocity,
       mode="interval",
@@ -180,12 +246,11 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
         },
       },
     ),
-    # ── Domain randomisation (startup, applied once per training run).
     "foot_friction": EventTermCfg(
       mode="startup",
       func=dr.geom_friction,
       params={
-        "asset_cfg": SceneEntityCfg("robot", geom_names=()),  # set per-robot
+        "asset_cfg": SceneEntityCfg("robot", geom_names=()),
         "operation": "abs",
         "ranges": (0.3, 1.6),
         "shared_random": True,
@@ -203,7 +268,7 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
       mode="startup",
       func=dr.body_com_offset,
       params={
-        "asset_cfg": SceneEntityCfg("robot", body_names=()),  # set per-robot
+        "asset_cfg": SceneEntityCfg("robot", body_names=()),
         "operation": "add",
         "ranges": {0: (-0.05, 0.05), 1: (-0.05, 0.05), 2: (-0.05, 0.05)},
       },
@@ -214,10 +279,7 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
   rewards = {
 
     # ── Phase 1: get off the floor ────────────────────────────────────────────
-    #
-    # orientation_recovery: primary upright signal. Gaussian on (proj_gz + 1)^2.
-    #   Correctly distinguishes upright (0), flat (1), inverted (4).
-    #   std=1.0 provides gradient across the full range.
+
     "orientation_recovery": RewardTermCfg(
       func=mdp.orientation_recovery,
       weight=3.0,
@@ -226,113 +288,91 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
         "asset_cfg": SceneEntityCfg("robot"),
       },
     ),
-    # height_recovery: pelvis rising. Gradient from 0.25 m (fallen) to 0.78 m.
     "height_recovery": RewardTermCfg(
       func=mdp.height_recovery,
       weight=2.0,
       params={
-        "target_height": 0.78,   # m — G1 pelvis at standing
-        "std": 0.65,             # m — wide enough to reach from fallen height
+        "target_height": 0.78,
+        "std": 0.65,
         "asset_cfg": SceneEntityCfg("robot"),
       },
     ),
-    # torso_height_reward: CHEST (not pelvis) height. Position-based Gaussian —
-    #   cannot be farmed by waist oscillation (oscillation earns reward only at
-    #   the mean position). Body names set per-robot to the torso_link.
     "torso_height_reward": RewardTermCfg(
       func=mdp.torso_height_reward,
       weight=3.0,
       params={
-        "target_height": 0.90,  # m — G1 torso_link at standing ~0.88-0.92 m
-        "std": 0.50,            # m — gradient from 0.15 m (flat) to target
+        "target_height": 0.90,
+        "std": 0.50,
         "asset_cfg": SceneEntityCfg("robot", body_names=()),  # set per-robot
       },
     ),
     # arm_reach_down: pull hands toward floor level when robot is flat.
-    #   Provides gradient BEFORE ground contact so the arm motion is
-    #   discoverable without already knowing how to do push-ups.
-    #   flat_gate_threshold=-0.85: active until 31° from upright (not 45°),
-    #   so arm guidance continues through the sit-to-stand transition.
+    # Provides gradient BEFORE arm-ground contact so the arm motion is
+    # discoverable without already knowing how to push up.
     "arm_reach_down": RewardTermCfg(
       func=mdp.arm_reach_down,
       weight=1.5,
       params={
-        "height_gate": 0.60,          # m — suppress once hand is above mid-recovery
-        "flat_gate_threshold": -0.85, # active until 31° from upright
-        "asset_cfg": SceneEntityCfg("robot", body_names=()),  # set per-robot
-      },
-    ),
-    # elbow_push_from_ground: elbow velocity ONLY when that arm is on the ground.
-    #   Left arm contact gates left elbow; right arm contact gates right elbow.
-    #   Forces the sequence: reach → plant → push → chest rises.
-    #   sensor_name and body_names set per-robot in the G1 config.
-    "elbow_push_from_ground": RewardTermCfg(
-      func=mdp.elbow_push_from_ground,
-      weight=3.5,
-      params={
-        "sensor_name": "arm_ground_contact",  # added in G1 config
-        "height_gate": 0.70,
-        "max_vel": 1.5,
+        "height_gate": 0.60,
         "flat_gate_threshold": -0.85,
         "asset_cfg": SceneEntityCfg("robot", body_names=()),  # set per-robot
       },
     ),
+    # pushup_support_reward: position-based replacement for the removed
+    # elbow_push_from_ground (velocity-based, caused bouncing).
+    # Rewards elbow being at push-up height (0.35 m) WHILE arm is in contact.
+    # Cannot be farmed by bouncing: oscillating elbow earns 0.21 vs 1.0 for
+    # sustained push-up position. The robot learns to HOLD the push-up, not
+    # to bounce. Weight 4.0 (was 3.5 for elbow_push_from_ground — slightly
+    # higher because this reward is harder to achieve by accident).
+    "pushup_support_reward": RewardTermCfg(
+      func=mdp.pushup_support_reward,
+      weight=4.0,
+      params={
+        "sensor_name": "arm_ground_contact",  # set per-robot in G1 config
+        "target_height": 0.35,   # m — G1 elbow in push-up position
+        "std": 0.20,             # m — gradient from floor (0.10 m) to push-up (0.35 m)
+        "height_gate": 0.65,     # m — suppress once robot is nearly standing
+        "flat_gate_threshold": -0.70,  # active until 46° from upright
+        "asset_cfg": SceneEntityCfg("robot", body_names=()),  # set per-robot (elbow bodies)
+      },
+    ),
 
     # ── Phase 2: sit-to-stand ─────────────────────────────────────────────────
-    #
-    # shank_orientation_reward: ANTI-SITTING signal (HoST-inspired).
-    #   In sitting with legs extended forward, knee→ankle direction is 30-50°
-    #   from vertical (cosine ≈ 0.55-0.70). Squatting/standing requires
-    #   cosine ≈ 1.0 (shank vertical). std=0.50 (NOT 0.30): at 0.30, sitting
-    #   range gives near-zero reward (exp(-2.8)≈0.06) — gradient invisible to
-    #   PPO. At 0.50 the same range gives exp(-0.81)≈0.44 — 4× clearer.
-    #   Gate: pelvis > 0.30 m (suppress during flat push-up phase).
-    #   body_names set per-robot to knee_link and ankle_roll_link bodies.
+
     "shank_orientation_reward": RewardTermCfg(
       func=mdp.shank_orientation_reward,
       weight=3.5,
       params={
-        "height_gate": 0.30,  # m — active from floor clearance
-        "std": 0.50,          # wider for clear gradient at sitting range
+        "height_gate": 0.30,
+        "std": 0.50,
         "knee_asset_cfg":  SceneEntityCfg("robot", body_names=()),  # set per-robot
         "ankle_asset_cfg": SceneEntityCfg("robot", body_names=()),  # set per-robot
       },
     ),
-    # head_above_feet_reward: head height RELATIVE to feet (HoST-inspired).
-    #   Relative measurement gives 2.5× ratio sitting vs standing (0.88 m vs
-    #   1.28 m), compared to 1.5× for the old absolute head_height_reward.
-    #   target=1.15 m above feet, std=0.25 m.
-    #   body_names set per-robot to torso_link and ankle_roll_link bodies.
     "head_above_feet_reward": RewardTermCfg(
       func=mdp.head_above_feet_reward,
       weight=2.5,
       params={
-        "target_height": 1.15,  # m above feet — G1 standing ≈ 1.28 m
+        "target_height": 1.15,
         "std": 0.25,
-        "head_offset": 0.43,    # m — G1 head geom above torso_link origin
+        "head_offset": 0.43,
         "torso_asset_cfg": SceneEntityCfg("robot", body_names=()),  # set per-robot
         "foot_asset_cfg":  SceneEntityCfg("robot", body_names=()),  # set per-robot
       },
     ),
-    # feet_proximity_reward: feet close to pelvis XY when pelvis is elevated.
-    #   Sitting: feet 0.60 m from pelvis; squat: 0.10-0.20 m.
-    #   std=0.45 (NOT 0.30): at 0.30, gradient at 0.60 m foot distance is
-    #   near-zero. At 0.45 it is meaningful from the start of the tuck.
     "feet_proximity_reward": RewardTermCfg(
       func=mdp.feet_proximity_reward,
       weight=2.0,
       params={
-        "height_gate": 0.35,  # m — active once pelvis clears prone height
+        "height_gate": 0.35,
         "std": 0.45,
         "asset_cfg": SceneEntityCfg("robot", body_names=()),  # set per-robot
       },
     ),
 
     # ── Phase 3: hold standing ────────────────────────────────────────────────
-    #
-    # pose_convergence_gated: joint positions toward default, gated by (-proj_gz).
-    #   When flat (proj_gz≈0): gate≈0 — no pose reward (prevent "stay flat
-    #   in default joints" local optimum). When upright (proj_gz≈-1): gate=1.
+
     "pose_convergence_gated": RewardTermCfg(
       func=mdp.pose_convergence_gated,
       weight=1.5,
@@ -341,21 +381,16 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
         "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
       },
     ),
-    # hold_bonus: fires when robot is simultaneously near-neutral AND near-zero
-    #   body velocity. Incentivises holding once the other rewards guide to
-    #   standing rather than drifting back down.
     "hold_bonus": RewardTermCfg(
       func=mdp.hold_bonus,
       weight=1.0,
       params={
-        "pose_threshold":    0.08,   # mean |q - q_default| < 0.08 rad
-        "ang_vel_threshold": 0.15,   # |ω_b| < 0.15 rad/s
-        "lin_vel_threshold": 0.10,   # |v_b| < 0.10 m/s
+        "pose_threshold":    0.08,
+        "ang_vel_threshold": 0.15,
+        "lin_vel_threshold": 0.10,
         "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
       },
     ),
-    # both_feet_contact: low weight (0.2, not 0.5) because rolling/flipping
-    #   requires feet to leave the ground. 0.5 over-penalised rolling motions.
     "both_feet_contact": RewardTermCfg(
       func=mdp.both_feet_contact,
       weight=0.2,
@@ -363,57 +398,60 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
     ),
 
     # ── Penalties ─────────────────────────────────────────────────────────────
-    #
-    # body_orientation_l2: penalise non-upright torso. Weight -3.0 (increased
-    #   from v2's -2.0) to make the sitting/flat pose clearly unattractive.
+
     "body_orientation_l2": RewardTermCfg(
       func=mdp.body_orientation_l2,
       weight=-3.0,
       params={"asset_cfg": SceneEntityCfg("robot", body_names=())},  # set per-robot
     ),
-    # body_ang_vel: penalise excessive body spin. Weight -0.03 (NOT -0.10):
-    #   recovery REQUIRES deliberate body rotation (rolling from supine to prone,
-    #   then from prone to upright). -0.10 actively fought the get-up motion.
-    "body_ang_vel": RewardTermCfg(
-      func=mdp.body_angular_velocity_penalty,
-      weight=-0.03,
-      params={"asset_cfg": SceneEntityCfg("robot", body_names=())},  # set per-robot
+    # height_gated_ang_vel: replaces body_angular_velocity_penalty (ungated).
+    # Zero below 0.40 m (floor recovery phase) → rolling/flipping are allowed.
+    # Ramps to full penalty above 0.65 m → prevents instability when elevated.
+    # Weight -0.05 (slightly higher than old -0.03 because it only fires when
+    # elevated, so per-step average penalty over an episode is similar).
+    "height_gated_ang_vel": RewardTermCfg(
+      func=mdp.height_gated_ang_vel_penalty,
+      weight=-0.05,
+      params={
+        "gate_min_height": 0.40,  # m — penalty zero below this (floor phase)
+        "gate_max_height": 0.65,  # m — full penalty above this (standing phase)
+        "asset_cfg": SceneEntityCfg("robot", body_names=()),  # set per-robot (torso)
+      },
     ),
-    # angular_momentum: same rationale as body_ang_vel. -0.008 (was -0.025).
+    # angular_momentum: reduced weight -0.002 (was -0.008).
+    # The body rolling and arm swinging needed for floor recovery generates
+    # large whole-body angular momentum. -0.008 over-penalised this.
     "angular_momentum": RewardTermCfg(
       func=mdp.angular_momentum_penalty,
-      weight=-0.008,
+      weight=-0.002,
       params={"sensor_name": "robot/root_angmom"},
     ),
-    # joint_vel_penalty: -0.008 (was -0.02). Vigorous push-up and leg-swing
-    #   motions require fast joint velocities. Over-penalising them slows recovery.
+    # joint_vel_penalty: reduced weight -0.002 (was -0.008).
+    # Vigorous push-up and leg-swing need fast joint velocities.
     "joint_vel_penalty": RewardTermCfg(
       func=mdp.joint_vel_penalty,
-      weight=-0.008,
+      weight=-0.002,
       params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*")},
     ),
-    "joint_acc_l2": RewardTermCfg(func=mdp.joint_acc_l2, weight=-2.5e-7),
+    # joint_acc_l2: reduced -5e-8 (was -2.5e-7) — same rationale.
+    "joint_acc_l2": RewardTermCfg(func=mdp.joint_acc_l2, weight=-5e-8),
     "joint_pos_limits": RewardTermCfg(func=mdp.joint_pos_limits, weight=-10.0),
-    # action_rate_l2: -0.02 (was -0.05). Recovery transitions rapidly between
-    #   phases (push → tuck → stand); smoother penalty allows faster transitions.
-    "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.02),
+    # action_rate_l2: reduced -0.005 (was -0.02).
+    # Recovery transitions rapidly between phases (push → tuck → stand).
+    # -0.02 penalised fast phase transitions enough to slow down the entire
+    # recovery sequence.
+    "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.005),
     "is_terminated": RewardTermCfg(func=mdp.is_terminated, weight=-200.0),
   }
 
   # ── Terminations ───────────────────────────────────────────────────────────────
   terminations = {
     "time_out": TerminationTermCfg(func=mdp.time_out, time_out=True),
-    # fell_over with HEIGHT GATE at 0.65 m (not 0.50 m).
-    #   At 0.50 m: the prone→bridge→squat trajectory crosses 0.50 m while
-    #   still tilted → episode terminates → robot learns to AVOID rising past
-    #   0.50 m → stuck in shallow leg-bridge. At 0.65 m the full mid-recovery
-    #   path (0.15-0.65 m) is termination-free; unstable near-standing states
-    #   (> 0.65 m + tilted 75°) are still terminated.
     "fell_over": TerminationTermCfg(
       func=mdp.bad_orientation_while_elevated,
       params={
         "limit_angle": math.radians(75.0),
-        "height_threshold": 0.65,  # m — raised from 0.50
+        "height_threshold": 0.65,
       },
     ),
   }
@@ -454,13 +492,9 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
       elevation=-5.0,
       azimuth=90.0,
     ),
-    decimation=4,  # 4 sim steps per policy step: 0.005 × 4 = 0.02 s control period (50 Hz)
+    decimation=4,
     sim=SimulationCfg(
       nconmax=None,
-      # njmax=600: G1 floor contact uses up to 454 constraint equations
-      # (nefc). 600 gives safe headroom without excessive memory cost.
-      # transition_v2 inherited njmax=300 — the root cause of the NaN crash
-      # at 1.4k steps (nefc overflow corrupted physics → NaN observations).
       njmax=600,
       mujoco=MujocoCfg(
         timestep=0.005,

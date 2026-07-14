@@ -560,6 +560,163 @@ def shank_orientation_reward(
   return reward * gate
 
 
+def pushup_support_reward(
+  env: ManagerBasedRlEnv,
+  sensor_name: str,
+  target_height: float,
+  std: float,
+  height_gate: float,
+  flat_gate_threshold: float = -0.70,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Position-based arm push-up reward: elbow elevated while arm contacts the ground.
+
+  This is the position-based replacement for the velocity-based
+  ``elbow_push_from_ground``.  The key difference:
+
+    elbow_push_from_ground (REMOVED — velocity-based, farmable):
+      Rewards max(0, elbow_vel_z) × arm_contact.  The robot earns reward on
+      EVERY upward elbow bounce even if the elbow returns to floor level each
+      cycle.  Bouncing the elbow at 2 Hz while lying flat earns reward on
+      50 % of steps indefinitely → discovered early, dominates the policy.
+
+    pushup_support_reward (this function — position-based, not farmable):
+      Rewards exp(-(elbow_z − target_height)² / std²) × arm_contact.
+      The reward is a function of CURRENT elbow height, not velocity:
+        Bouncing, elbow at floor level (~0.10 m):  0.21 × contact
+        Mid push-up, elbow at 0.25 m:              0.78 × contact
+        Full push-up sustained, elbow at 0.35 m:   1.00 × contact
+      The robot maximises this by HOLDING the push-up position, not
+      by oscillating.  Bouncing earns 0.21; holding earns 1.0.
+
+  How it guides the push-up sequence:
+    1. arm_reach_down (kept)  → hand reaches floor; arm_contact becomes 1
+    2. this reward fires immediately at moderate level (0.21)
+    3. arm extends: elbow rises from 0.10 → 0.35 m → reward 1.0
+    4. chest rises: torso_height_reward and orientation_recovery fire strongly
+    5. policy learns to SUSTAIN the elevated elbow = real push-up
+
+  asset_cfg.body_ids must resolve to the two elbow_link bodies (left, right)
+  in the same left/right order as the sensor.
+
+  Args:
+    sensor_name: Arm ground contact sensor (same as former elbow_push_from_ground).
+      Shape (B, 2) found — left arm / right arm.
+    target_height: Target elbow z (m) = push-up elbow height above terrain.
+      G1 in push-up: elbow at ~0.30–0.40 m. Recommended 0.35 m.
+    std: Gaussian width (m). 0.20 m gives clear gradient from floor (0.10 m) to
+      push-up height (0.35 m): exp(-(0.10-0.35)²/0.04) = 0.21 at floor.
+    height_gate: Suppress above this pelvis height (m). 0.65 m = not yet standing.
+    flat_gate_threshold: Orientation gate (proj_gz threshold). Active when
+      proj_gz > threshold (robot is flat or partially upright). -0.70 ≈ 46° from
+      vertical — keeps arm support active through the critical sit-to-stand phase.
+    asset_cfg: SceneEntityCfg for the two elbow bodies (body_names set per robot).
+  """
+  asset = env.scene[asset_cfg.name]
+  sensor: ContactSensor = env.scene[sensor_name]
+  assert sensor.data.found is not None
+
+  origins_z = env.scene.env_origins[:, 2].unsqueeze(1)                   # (B, 1)
+  elbow_z = (
+    asset.data.body_link_pos_w[:, asset_cfg.body_ids, 2] - origins_z
+  )  # (B, 2)
+
+  # Position-based Gaussian: peaks when elbow is at target_height.
+  elbow_reward = torch.exp(-torch.square(elbow_z - target_height) / std**2)  # (B, 2)
+
+  # Gate 1: per-arm contact — reward only fires when arm presses on ground.
+  arm_contact = (sensor.data.found > 0).float()  # (B, 2)
+
+  # Gate 2: flat-phase gate — active when robot is sufficiently flat.
+  proj_gz = asset.data.projected_gravity_b[:, 2]
+  flat_gate = (proj_gz > flat_gate_threshold).float().unsqueeze(1)        # (B, 1)
+
+  # Gate 3: pelvis height gate — suppress once robot is nearly standing.
+  pelvis_z = asset.data.root_link_pos_w[:, 2] - env.scene.env_origins[:, 2]  # (B,)
+  height_gate_mask = (pelvis_z < height_gate).float().unsqueeze(1)            # (B, 1)
+
+  return (elbow_reward * arm_contact * flat_gate * height_gate_mask).mean(dim=1)  # (B,)
+
+
+def height_gated_ang_vel_penalty(
+  env: ManagerBasedRlEnv,
+  gate_min_height: float,
+  gate_max_height: float,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Angular velocity penalty gated to zero during the floor-recovery phase.
+
+  Why the ungated penalty (body_angular_velocity_penalty) breaks floor recovery
+  ─────────────────────────────────────────────────────────────────────────────
+  Rolling from supine to prone / flipping from prone to push-up requires
+  sustained XY body angular velocity of 1–2 rad/s.  With weight -0.03 and
+  ang_vel² = 2.25 per step, the penalty is -0.068/step.  Over a 1-second roll
+  (50 steps) this accumulates to -3.4.  The orientation_recovery improvement
+  over the same roll is +9.0.  On paper the net is positive — BUT the GAE
+  discount (λ=0.95, γ=0.99 → horizon ≈ 17 steps) means the future orientation
+  gain is visible over only ~17 steps, not 50.  The IMMEDIATE angular penalty
+  sees full weight; the distant orientation gain is heavily discounted.
+  Net discounted advantage ≈ -1.16 (penalty) + 0.42 (orientation) = -0.74.
+  The policy correctly learns NOT to roll because it looks unprofitable at the
+  GAE horizon.
+
+  This function removes the penalty below gate_min_height (floor phase) where
+  rolling/flipping are necessary, and restores it smoothly above gate_max_height
+  (elevated/standing phase) where large angular velocity indicates instability.
+
+  Smooth transition:
+    gate(h) = clamp((h - gate_min_height) / (gate_max_height - gate_min_height), 0, 1)
+    penalty  = -weight × ang_vel_xy² × gate(h)
+
+    h < gate_min_height:    gate = 0 → no penalty  (floor, rolling allowed)
+    h between min/max:      gate ∈ (0, 1)          (mid-recovery, graduated)
+    h > gate_max_height:    gate = 1 → full penalty (elevated, prevent falls)
+
+  asset_cfg.body_ids must resolve to the torso body (same as body_angular_velocity_penalty).
+
+  Args:
+    gate_min_height: Pelvis height (m) below which the penalty is zero.
+      Recommended 0.40 m — just above the floor push-up phase (~0.30 m).
+    gate_max_height: Pelvis height (m) above which the full penalty applies.
+      Recommended 0.65 m — start of the standing zone.
+    asset_cfg: SceneEntityCfg with body_ids resolved to torso body (set per robot).
+  """
+  asset = env.scene[asset_cfg.name]
+
+  pelvis_z = asset.data.root_link_pos_w[:, 2] - env.scene.env_origins[:, 2]  # (B,)
+  gate = ((pelvis_z - gate_min_height) / (gate_max_height - gate_min_height)).clamp(0.0, 1.0)  # (B,)
+
+  # XY angular velocity of the torso body (same as body_angular_velocity_penalty).
+  ang_vel = asset.data.body_link_ang_vel_w[:, asset_cfg.body_ids, :].squeeze(1)  # (B, 3)
+  ang_vel_xy_sq = torch.sum(torch.square(ang_vel[:, :2]), dim=1)                 # (B,)
+
+  return ang_vel_xy_sq * gate  # (B,)  — multiply by -weight in the reward config
+
+
+def base_height_obs(
+  env: ManagerBasedRlEnv,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Pelvis height above terrain — critical phase-detection signal for the actor.
+
+  The actor cannot infer absolute height from projected_gravity + joint_pos
+  alone: a robot in a push-up at 0.40 m and one nearly-standing at 0.70 m
+  can have similar projected gravity and joint configurations, yet need
+  completely different actions.  Height disambiguates the phase.
+
+  Returns a single scalar per env (B, 1) normalised so:
+    0.0 ≈ floor-level (fallen)      ~0.15 m
+    1.0 ≈ standing height            ~0.80 m
+  Actual range is not clamped; the obs normalisation in the actor handles
+  values outside [0, 1].
+  """
+  asset = env.scene[asset_cfg.name]
+  height = (
+    asset.data.root_link_pos_w[:, 2] - env.scene.env_origins[:, 2]
+  ).unsqueeze(1)  # (B, 1)
+  return height
+
+
 def head_above_feet_reward(
   env: ManagerBasedRlEnv,
   target_height: float,

@@ -8,12 +8,14 @@ from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.event_manager import EventTermCfg
+from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
 
 from src.assets.robots import G1_ACTION_SCALE, get_g1_robot_cfg
 from src.tasks.transition.mdp import self_collision_cost
 from src.tasks.recovery_v1.recovery_v1_env_cfg import make_recovery_v1_env_cfg
+import src.tasks.recovery_v1.mdp as mdp
 
 
 def unitree_g1_recovery_v1_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -21,7 +23,7 @@ def unitree_g1_recovery_v1_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg = make_recovery_v1_env_cfg()
 
   cfg.sim.contact_sensor_maxmatch = 64
-  cfg.sim.njmax = 600  # G1 floor contact uses up to 454 nefc; 600 prevents overflow
+  cfg.sim.njmax = 600
 
   cfg.scene.entities = {"robot": get_g1_robot_cfg()}
 
@@ -29,7 +31,7 @@ def unitree_g1_recovery_v1_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     f"{side}_foot{i}_collision" for side in ("left", "right") for i in range(1, 8)
   )
 
-  # Ground-contact sensor for feet — same definition as v3.
+  # Ground-contact sensor for feet.
   feet_ground_cfg = ContactSensorCfg(
     name="feet_ground_contact",
     primary=ContactMatch(
@@ -44,9 +46,7 @@ def unitree_g1_recovery_v1_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     track_air_time=True,
   )
 
-  # Self-collision sensor — same definition as v3.
-  # The robot may collide more during rolling/flipping motions, so history
-  # length of 4 ensures transient contacts during get-up are penalised.
+  # Self-collision sensor.
   self_collision_cfg = ContactSensorCfg(
     name="self_collision",
     primary=ContactMatch(mode="subtree", pattern="pelvis", entity="robot"),
@@ -59,11 +59,7 @@ def unitree_g1_recovery_v1_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
   # Arm ground contact sensor.
   # Primary: subtree of left_elbow_link and right_elbow_link — covers all forearm
-  # geoms (left_elbow_yaw_collision, left_wrist_collision, left_hand_collision and
-  # the right-side equivalents).  This means the sensor fires whether the robot
-  # presses its elbows, wrists, or palms into the terrain.
-  # Secondary: terrain.
-  # Two primary patterns -> sensor.data.found shape (B, 2) [left arm, right arm].
+  # geoms (elbow_yaw, wrist, hand).  Two primary patterns → shape (B, 2).
   arm_ground_cfg = ContactSensorCfg(
     name="arm_ground_contact",
     primary=ContactMatch(
@@ -89,41 +85,53 @@ def unitree_g1_recovery_v1_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
   cfg.viewer.body_name = "torso_link"
 
-  # Wire foot-contact sensors for critic observations.
+  # ── Actor observation wiring ──────────────────────────────────────────────────
+  # foot_contact in actor: same sensor as critic, no extra sensor needed.
+  cfg.observations["actor"].terms["foot_contact"].params[
+    "sensor_name"
+  ] = feet_ground_cfg.name
+
+  # arm_contact in actor: reads arm_ground_contact sensor's found field.
+  # Uses mdp.foot_contact (same pattern — reads sensor.data.found.float()).
+  cfg.observations["actor"].terms["arm_contact"].params[
+    "sensor_name"
+  ] = arm_ground_cfg.name
+
+  # ── Critic observation wiring ─────────────────────────────────────────────────
   cfg.observations["critic"].terms["foot_contact"].params[
     "sensor_name"
   ] = feet_ground_cfg.name
   cfg.observations["critic"].terms["foot_contact_forces"].params[
     "sensor_name"
   ] = feet_ground_cfg.name
+  cfg.observations["critic"].terms["arm_contact"].params[
+    "sensor_name"
+  ] = arm_ground_cfg.name
 
-  # Domain randomisation targets.
+  # ── Domain randomisation targets ─────────────────────────────────────────────
   cfg.events["foot_friction"].params["asset_cfg"].geom_names = geom_names
   cfg.events["base_com"].params["asset_cfg"].body_names = ("torso_link",)
 
-  # G1 reward body references.
+  # ── Reward body references ────────────────────────────────────────────────────
   cfg.rewards["body_orientation_l2"].params["asset_cfg"].body_names = ("torso_link",)
-  cfg.rewards["body_ang_vel"].params["asset_cfg"].body_names = ("torso_link",)
   cfg.rewards["torso_height_reward"].params["asset_cfg"].body_names = ("torso_link",)
 
-  # G1 arm reward body references.
-  # arm_reach_down tracks the wrist_yaw_link bodies (palms / hand endpoint).
+  # height_gated_ang_vel: same body as old body_ang_vel (torso_link).
+  cfg.rewards["height_gated_ang_vel"].params["asset_cfg"].body_names = ("torso_link",)
+
+  # arm_reach_down tracks wrist_yaw_link bodies.
   cfg.rewards["arm_reach_down"].params["asset_cfg"].body_names = (
     "left_wrist_yaw_link",
     "right_wrist_yaw_link",
   )
-  # elbow_push_from_ground tracks the elbow_link bodies.
-  # The arm_ground_contact sensor (arm_ground_cfg) is still present in the scene
-  # and is used internally by elbow_push_from_ground for its per-arm contact gate;
-  # it is no longer registered as a standalone reward (removed: local-optimum trap).
-  cfg.rewards["elbow_push_from_ground"].params["asset_cfg"].body_names = (
+
+  # pushup_support_reward tracks elbow_link bodies (same as former elbow_push_from_ground).
+  cfg.rewards["pushup_support_reward"].params["asset_cfg"].body_names = (
     "left_elbow_link",
     "right_elbow_link",
   )
 
-  # G1 stand-up phase reward body references.
-  #
-  # shank_orientation_reward: shank = knee_link → ankle_roll_link segment.
+  # shank_orientation_reward: knee_link → ankle_roll_link.
   cfg.rewards["shank_orientation_reward"].params["knee_asset_cfg"].body_names = (
     "left_knee_link",
     "right_knee_link",
@@ -132,21 +140,21 @@ def unitree_g1_recovery_v1_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     "left_ankle_roll_link",
     "right_ankle_roll_link",
   )
-  #
+
   # head_above_feet_reward: head estimated from torso_link; feet from ankle_roll_links.
   cfg.rewards["head_above_feet_reward"].params["torso_asset_cfg"].body_names = ("torso_link",)
   cfg.rewards["head_above_feet_reward"].params["foot_asset_cfg"].body_names = (
     "left_ankle_roll_link",
     "right_ankle_roll_link",
   )
-  #
-  # feet_proximity_reward tracks ankle_roll_link as foot proxies.
+
+  # feet_proximity_reward tracks ankle_roll_links.
   cfg.rewards["feet_proximity_reward"].params["asset_cfg"].body_names = (
     "left_ankle_roll_link",
     "right_ankle_roll_link",
   )
 
-  # Self-collision penalty — same as v3.
+  # Self-collision penalty.
   cfg.rewards["self_collisions"] = RewardTermCfg(
     func=self_collision_cost,
     weight=-1.0,

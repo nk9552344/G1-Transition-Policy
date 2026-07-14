@@ -34,13 +34,16 @@ from src.tasks.transition_v2.mdp.rewards import (  # noqa: F401
 from .events import reset_to_fallen_or_bent_pose   # noqa: F401
 from .rewards import (                             # noqa: F401
   arm_reach_down,
+  base_height_obs,
   elbow_push_from_ground,
   feet_proximity_reward,
   head_above_feet_reward,
   head_height_reward,
+  height_gated_ang_vel_penalty,
   height_recovery,
   orientation_recovery,
   pose_convergence_gated,
+  pushup_support_reward,
   shank_orientation_reward,
   torso_height_reward,
 )

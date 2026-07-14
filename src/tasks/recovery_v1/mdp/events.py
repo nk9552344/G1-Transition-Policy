@@ -160,10 +160,16 @@ SQUAT_LEAN_CONFIGS: list[dict] = [
   },
 ]
 
-# Unified list: 2 fallen + 2 sitting + 1 squat_lean + 4 bent = 9 templates (22 / 22 / 11 / 44 %).
-# Side-lying templates are deferred to recovery_v2.
+# Unified list: 4 fallen + 2 sitting + 1 squat_lean + 4 bent = 11 templates (36 / 18 / 9 / 36 %).
+# Side-lying templates now included: G1 frequently falls to its side and the
+# policy must learn to recover from that configuration.  Without side_left /
+# side_right starts the policy never trains for the lateral-roll-to-prone step.
+#
+# Fallen fraction increased from 22 % → 36 %: more fallen experience reduces
+# the std-bias that 44 % upright starts produced (balance skill dominated,
+# leaving too little exploration capacity for recovery).
 ALL_POSE_CONFIGS: list[dict] = [
-  {**cfg, "type": "fallen"}     for cfg in FALLEN_POSE_CONFIGS[:2]    # supine, prone
+  {**cfg, "type": "fallen"}     for cfg in FALLEN_POSE_CONFIGS        # supine, prone, side_left, side_right
 ] + [
   {**cfg, "type": "fallen"}     for cfg in SITTING_POSE_CONFIGS       # sitting-up states
 ] + [
@@ -188,6 +194,9 @@ def reset_to_fallen_or_bent_pose(
   knee_cfg: SceneEntityCfg,
   hip_pitch_cfg: SceneEntityCfg,
   ankle_cfg: SceneEntityCfg,
+  fallen_lin_vel_range: float | None = None,
+  fallen_ang_vel_range: float | None = None,
+  fallen_joint_vel_range: float | None = None,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> None:
   """Reset each environment to a randomly sampled fallen or bent-leg pose.
@@ -204,6 +213,7 @@ def reset_to_fallen_or_bent_pose(
     2. Set orientation to the 90°-tilt quaternion, composed with random yaw
        so the robot lies in a different world direction each episode.
     3. Set all joints to default + fallen_joint_perturbation noise.
+    4. Apply fallen-specific (small) initial velocities if provided.
 
   For bent templates:
     1. Set pelvis z to template's FK-verified base_z.
@@ -222,13 +232,25 @@ def reset_to_fallen_or_bent_pose(
     fallen_joint_perturbation: ±noise (rad) on ALL joints for fallen templates.
     leg_perturbation: ±noise (rad) on knee/hip/ankle for bent templates.
     other_perturbation: ±noise (rad) on non-leg joints for bent templates.
-    joint_vel_range: ±range (rad/s) for initial joint velocities.
-    lin_vel_range: ±range (m/s) for initial base linear velocity (x, y).
-    ang_vel_range: ±range (rad/s) for initial base angular velocity.
+    joint_vel_range: ±range (rad/s) for initial joint velocities (bent states).
+    lin_vel_range: ±range (m/s) for initial base linear velocity (bent states).
+    ang_vel_range: ±range (rad/s) for initial base angular velocity (bent states).
+    fallen_lin_vel_range: ±range (m/s) for fallen-state base linear velocity.
+      If None, falls back to lin_vel_range. Recommend 0.05 m/s — large initial
+      velocities collide with ground contact geometry and create the oscillation
+      that the policy can mistakenly exploit as a velocity-based reward signal.
+    fallen_ang_vel_range: ±range (rad/s) for fallen-state base angular velocity.
+      If None, falls back to ang_vel_range. Recommend 0.10 rad/s.
+    fallen_joint_vel_range: ±range (rad/s) for fallen-state joint velocities.
+      If None, falls back to joint_vel_range. Recommend 0.05 rad/s.
     knee_cfg, hip_pitch_cfg, ankle_cfg: Resolved SceneEntityCfg objects
       providing joint IDs for the leg joints (used by bent templates).
     asset_cfg: Resolved SceneEntityCfg for the full robot.
   """
+  # Resolve fallen-specific velocity ranges (default to generic if not provided).
+  _fallen_lin_vel   = fallen_lin_vel_range   if fallen_lin_vel_range   is not None else lin_vel_range
+  _fallen_ang_vel   = fallen_ang_vel_range   if fallen_ang_vel_range   is not None else ang_vel_range
+  _fallen_joint_vel = fallen_joint_vel_range if fallen_joint_vel_range is not None else joint_vel_range
   if env_ids is None:
     env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int)
 
@@ -303,9 +325,19 @@ def reset_to_fallen_or_bent_pose(
   joint_pos.clamp_(soft_limits[..., 0], soft_limits[..., 1])
 
   # ── 3. Build joint velocities ─────────────────────────────────────────────
-  joint_vel = asset.data.default_joint_vel[env_ids].clone() + torch.empty(
-    n, joint_pos.shape[1], device=device
-  ).uniform_(-joint_vel_range, joint_vel_range)
+  # Use smaller velocity range for fallen states to prevent immediate floor
+  # bouncing: large initial joint velocities cause arms/legs to thrash against
+  # ground contact geometry on the first few steps, generating oscillations that
+  # the policy can exploit as velocity-based reward signals.
+  joint_vel = asset.data.default_joint_vel[env_ids].clone()
+  bent_jvel_noise = torch.empty(n, joint_pos.shape[1], device=device).uniform_(
+    -joint_vel_range, joint_vel_range
+  )
+  fallen_jvel_noise = torch.empty(n, joint_pos.shape[1], device=device).uniform_(
+    -_fallen_joint_vel, _fallen_joint_vel
+  )
+  joint_vel[~is_fallen]  += bent_jvel_noise[~is_fallen]
+  joint_vel[is_fallen]   += fallen_jvel_noise[is_fallen]
 
   all_joint_ids = torch.arange(joint_pos.shape[1], device=device)
   asset.write_joint_state_to_sim(joint_pos, joint_vel, joint_ids=all_joint_ids, env_ids=env_ids)
@@ -385,9 +417,19 @@ def reset_to_fallen_or_bent_pose(
     orientation[is_squat_lean] = quat_mul(yaw_quat, squat_lean_quat_table)[is_squat_lean]
 
   # --- Velocities ----------------------------------------------------------
+  # Fallen states get near-zero initial velocities; bent states get the full
+  # perturbation range.  See fallen_lin_vel_range / fallen_ang_vel_range args.
   lin_vel = torch.zeros(n, 3, device=device)
-  lin_vel[:, :2] = torch.empty(n, 2, device=device).uniform_(-lin_vel_range, lin_vel_range)
-  ang_vel = torch.empty(n, 3, device=device).uniform_(-ang_vel_range, ang_vel_range)
+  bent_lin = torch.empty(n, 2, device=device).uniform_(-lin_vel_range, lin_vel_range)
+  fallen_lin = torch.empty(n, 2, device=device).uniform_(-_fallen_lin_vel, _fallen_lin_vel)
+  lin_vel[~is_fallen, :2] = bent_lin[~is_fallen]
+  lin_vel[is_fallen,  :2] = fallen_lin[is_fallen]
+
+  ang_vel = torch.zeros(n, 3, device=device)
+  bent_ang = torch.empty(n, 3, device=device).uniform_(-ang_vel_range, ang_vel_range)
+  fallen_ang = torch.empty(n, 3, device=device).uniform_(-_fallen_ang_vel, _fallen_ang_vel)
+  ang_vel[~is_fallen] = bent_ang[~is_fallen]
+  ang_vel[is_fallen]  = fallen_ang[is_fallen]
   ang_vel[:, 2].mul_(0.5)  # yaw rate is less destabilising than roll/pitch
 
   # Assemble and write root state.
