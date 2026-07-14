@@ -21,6 +21,7 @@ def unitree_g1_recovery_v1_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg = make_recovery_v1_env_cfg()
 
   cfg.sim.contact_sensor_maxmatch = 64
+  cfg.sim.njmax = 600  # G1 floor contact uses up to 454 nefc; 600 prevents overflow
 
   cfg.scene.entities = {"robot": get_g1_robot_cfg()}
 
