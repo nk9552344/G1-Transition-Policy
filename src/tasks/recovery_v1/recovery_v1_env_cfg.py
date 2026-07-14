@@ -340,11 +340,17 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
 
     # ── Phase 2: sit-to-stand ─────────────────────────────────────────────────
 
+    # shank_orientation_reward: gate lowered 0.30 → 0.25 m.
+    # At 0.30 m the margin above push-up pelvis height (~0.30–0.32 m) is only
+    # 0–20 mm — the reward may fire intermittently or not at all depending on
+    # the exact push-up configuration.  At 0.25 m it fires reliably once the
+    # robot is in any raised-arm pose, giving a clear gradient toward vertical
+    # shanks (knees tucked under body) throughout Phase 1 and Phase 2.
     "shank_orientation_reward": RewardTermCfg(
       func=mdp.shank_orientation_reward,
       weight=3.5,
       params={
-        "height_gate": 0.30,
+        "height_gate": 0.25,  # was 0.30; must fire reliably during push-up phase
         "std": 0.50,
         "knee_asset_cfg":  SceneEntityCfg("robot", body_names=()),  # set per-robot
         "ankle_asset_cfg": SceneEntityCfg("robot", body_names=()),  # set per-robot
@@ -361,11 +367,18 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
         "foot_asset_cfg":  SceneEntityCfg("robot", body_names=()),  # set per-robot
       },
     ),
+    # feet_proximity_reward: gate lowered 0.35 → 0.28 m.
+    # G1 pelvis in extended push-up position is ~0.30–0.32 m.  At gate=0.35 m
+    # this reward is INACTIVE during push-up, so the policy has no gradient to
+    # pull its feet toward its body.  Result: push-up local optimum — robot
+    # gets full pushup_support_reward with zero incentive to advance to Phase 2.
+    # At 0.28 m the reward fires from push-up height onward, providing the
+    # "tuck feet under pelvis" gradient immediately after Phase 1 succeeds.
     "feet_proximity_reward": RewardTermCfg(
       func=mdp.feet_proximity_reward,
       weight=2.0,
       params={
-        "height_gate": 0.35,
+        "height_gate": 0.28,  # was 0.35; must be below push-up pelvis height (~0.30m)
         "std": 0.45,
         "asset_cfg": SceneEntityCfg("robot", body_names=()),  # set per-robot
       },
@@ -441,17 +454,32 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
     # -0.02 penalised fast phase transitions enough to slow down the entire
     # recovery sequence.
     "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.005),
-    "is_terminated": RewardTermCfg(func=mdp.is_terminated, weight=-200.0),
+    # is_terminated: reduced -200 → -50.
+    # At lam=0.97 a termination at step 20 attributes -89 to the first action
+    # (vs -60 at lam=0.95). With 27 % of bent starts above the 0.65 m threshold,
+    # frequent tipping-from-perturbation events cause the -200 penalty to
+    # dominate and push the policy into a "don't do anything" collapse spiral.
+    # The episode ending already punishes implicitly (no more positive rewards).
+    # -50 still provides a strong deterrent without overwhelming the ~22/step
+    # maximum positive reward budget.
+    "is_terminated": RewardTermCfg(func=mdp.is_terminated, weight=-50.0),
   }
 
   # ── Terminations ───────────────────────────────────────────────────────────────
   terminations = {
     "time_out": TerminationTermCfg(func=mdp.time_out, time_out=True),
+    # fell_over: grace_period_steps=20 (= 0.4 s at 50 Hz).
+    # Bent starts (home=0.80m, knees_bent=0.77m, squat=0.69m) begin above the
+    # 0.65m threshold. The reset applies up to 0.30 rad/s angular perturbation
+    # which can tip the robot before the policy acts. Without a grace period the
+    # -50 termination penalty is attributed by GAE (lam=0.97) directly to the
+    # first policy action, even though the policy had no control over it.
     "fell_over": TerminationTermCfg(
       func=mdp.bad_orientation_while_elevated,
       params={
         "limit_angle": math.radians(75.0),
         "height_threshold": 0.65,
+        "grace_period_steps": 20,   # 0.4 s — policy gets time to respond before termination fires
       },
     ),
   }
