@@ -47,4 +47,7 @@ from .rewards import (                             # noqa: F401
   shank_orientation_reward,
   torso_height_reward,
 )
-from .terminations import bad_orientation_while_elevated  # noqa: F401
+from .terminations import (                                # noqa: F401
+  bad_orientation_while_elevated,
+  joint_velocity_overflow,
+)

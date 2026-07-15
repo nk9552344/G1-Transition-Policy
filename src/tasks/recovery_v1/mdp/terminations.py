@@ -111,3 +111,41 @@ def bad_orientation_while_elevated(
     return bad_orient & elevated & past_grace
 
   return bad_orient & elevated
+
+
+def joint_velocity_overflow(
+  env: ManagerBasedRlEnv,
+  threshold: float = 50.0,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Terminate episode when physics explodes (joint velocity overflow detector).
+
+  MuJoCo constraint equations can overflow when contact forces spike (e.g. the
+  robot lands hard or makes a large abrupt joint motion with decimation=4).
+  When they do, joint velocities diverge toward infinity in one or two steps —
+  too fast for the angular-velocity or action-rate penalties to suppress.
+
+  The overflow manifests as NaN in joint_vel observations, which crashes the
+  rsl_rl check_nan() call and kills the entire training run.
+
+  This termination catches the explosion BEFORE the NaN step by flagging any
+  environment where any joint velocity exceeds `threshold` rad/s.  Normal
+  recovery motions stay well under 15–20 rad/s; 50 rad/s is only reached
+  during physics instability.
+
+  Effect: the exploding episode is reset immediately, receiving `is_terminated`
+  penalty (-50) which discourages whatever action sequence triggered the
+  explosion.  All other environments continue normally — training does not crash.
+
+  Args:
+    threshold: Joint velocity (rad/s) above which the episode is terminated.
+      Recommended 50.0 — well above aggressive recovery (~15 rad/s) but below
+      the ~100+ rad/s seen during constraint overflow.
+    asset_cfg: SceneEntityCfg for the robot.
+
+  Returns:
+    Bool tensor [B]: True = terminate this env.
+  """
+  asset = env.scene[asset_cfg.name]
+  max_joint_vel = asset.data.joint_vel.abs().max(dim=1).values  # (B,)
+  return max_joint_vel > threshold
