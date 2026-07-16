@@ -100,8 +100,9 @@ Key design constraints preserved (do not revert):
   - All position-based (Gaussian) except penalties. NO velocity-based rewards —
     they are gameable by oscillation.
   - height_gated_ang_vel zero below 0.40 m: allows rolling/flipping on the floor.
-  - fallen_joint_perturbation=0.6: G1 push-up shoulder_pitch is 0.6-0.8 rad
-    above default. At 0.3 rad the arm never starts near the needed position.
+  - fallen_joint_perturbation=0.25: reduced from 0.6→0.4→0.25 to eliminate arm
+    clipping in prone/side-lying.  Push-up discovery now relies on arm_reach_down
+    + pushup_support_reward gradient rather than starting near the push-up position.
   - shank_orientation_reward std=0.50: at 0.30 the sitting cosine range gives
     near-zero reward → PPO can't see the gradient.
   - feet_proximity_reward std=0.45: meaningful gradient from knee-tuck start.
@@ -231,9 +232,9 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
         "all_pose_configs": ALL_POSE_CONFIGS,
         "xy_pos_range": 0.5,
         "yaw_range": math.pi,
-        "fallen_joint_perturbation": 0.4,  # arm joints: 0.4 rad needed for push-up shoulder-pitch range
-        "fallen_leg_perturbation":   0.10, # leg joints only: small to prevent hip+knee+ankle stacking feet below floor
-        "leg_perturbation": 0.10,
+        "fallen_joint_perturbation": 0.25, # arm/waist joints: 0.25 rad prevents shoulder+elbow from clipping floor in prone/side-lying
+        "fallen_leg_perturbation":   0.05, # leg joints only: 0.05 rad prevents ankle+hip clipping in sitting templates
+        "leg_perturbation": 0.05,  # was 0.10; deep_squat ankle=-0.60→-0.70 at 0.10 clips floor
         "other_perturbation": 0.35,
         # Fallen-state-specific initial velocities (small to prevent floor bounce).
         # Large initial velocities cause the body to thrash against ground contact
@@ -318,17 +319,20 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
         "asset_cfg": SceneEntityCfg("robot"),
       },
     ),
-    # torso_height_reward: weight 3.0 → 1.0.
-    # At weight 3.0, a hard-kick jump from push-up earns:
-    #   torso_height(3.0) + orientation_recovery(3.0) ≈ +6/step × 10 steps = +60
-    #   is_terminated = −50  →  net = +10  →  PROFITABLE to jump.
-    # At weight 1.0, the same jump earns:
-    #   torso_height(1.0) + orientation_recovery(3.0) ≈ +4/step × 10 steps = +40
-    #   is_terminated = −50  →  net = −10  →  NOT profitable.
-    # Legitimate recovery (200+ steps) still earns 1.0 × 200 = +200 → unaffected.
+    # torso_height_reward: weight restored 1.0 → 3.0.
+    # Was reduced to 1.0 to make jumping unprofitable, but this also removes 2/3
+    # of the "get tall" learning signal.  With root_lin_vel_penalty=-0.3 now
+    # handling explosive jumps (push-off at 5+ m/s earns −37.5 over 5 steps),
+    # the full weight 3.0 is safe.  Jump profitability math with root_lin_vel_penalty:
+    #   Phase rewards (14/step × 10 steps) = +140
+    #   root_lin_vel_penalty (5 m/s push-off 5 steps + 8 m/s airborne 5 steps) = −133.5
+    #   airborne_penalty (−10 × 5 steps) = −50
+    #   is_terminated = −50
+    #   Net = 140 − 133.5 − 50 − 50 = −93.5  →  NOT profitable.
+    # Legitimate recovery (200+ steps at torso=0.50 m): 3.0 × 0.527 × 200 = +316 → essential!
     "torso_height_reward": RewardTermCfg(
       func=mdp.torso_height_reward,
-      weight=1.0,  # was 3.0; reduces jump-hacking profitability
+      weight=3.0,  # restored from 1.0; root_lin_vel_penalty now prevents jump hacking
       params={
         "target_height": 0.90,
         "std": 0.50,
@@ -454,21 +458,40 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
       params={"asset_cfg": SceneEntityCfg("robot", body_names=())},  # set per-robot
     ),
     # airborne_penalty: direct anti-jump-hacking reward.
-    # Phase 2 rewards (shank=3.5 + head=2.5 + feet=2.0 = +9/step) all fire
-    # simultaneously during a brief jump from squat, earning +45–90 before
-    # is_terminated=-50 fires.  Net +5 to +40 → jump is profitable.
-    # With this penalty at -10.0: airborne 5 steps → -50.
-    # Net = +45 (Phase 2) - 50 (airborne) - 50 (termination) = -55 → NOT profitable.
-    # Does NOT fire during push-up (arm contact, pelvis below 0.40 m gate).
+    # min_height lowered 0.40 → 0.20 m: the original 0.40 m gate was too high.
+    # Prone/supine robots at base_z=0.35 m are already ABOVE 0.40 m when launched
+    # by a physics explosion — the penalty would not fire for the first ~3 steps
+    # while the robot rises from 0.35→0.40 m, providing a brief positive-reward
+    # window that reinforces the launch behaviour.
+    # At 0.20 m: any robot above push-up floor level (~0.15-0.20 m) with no
+    # arm/foot contact is immediately penalised.  The 3–5 step settling phase
+    # (robot drops from 0.35 m to floor) fires airborne_penalty briefly, but
+    # this incentivises the policy to reach for floor contact quickly — correct.
+    # Combined with root_lin_vel_penalty, jumping is fully unprofitable (see
+    # torso_height_reward comment above for the full net-reward calculation).
     "airborne_penalty": RewardTermCfg(
       func=mdp.airborne_penalty,
       weight=-10.0,
       params={
-        "min_height": 0.40,             # m — push-up pelvis (~0.30-0.35 m) is below this gate
+        "min_height": 0.20,             # m — lowered from 0.40; catches launches from prone base_z=0.35 m
         "foot_sensor_name": "feet_ground_contact",
         "arm_sensor_name":  "arm_ground_contact",
         "asset_cfg": SceneEntityCfg("robot"),
       },
+    ),
+    # root_lin_vel_penalty: penalises explosive whole-body velocity.
+    # The airborne_penalty fires AFTER feet leave the floor, but a jump is already
+    # decided during the ground-contact push-off phase (legs extend, body accelerates
+    # upward BEFORE feet lift).  root_lin_vel_penalty fires during the push-off:
+    #   slow recovery (0.5 m/s): −0.3 × 0.25 = −0.075/step (negligible)
+    #   explosive push-off (5 m/s): −0.3 × 25 = −7.5/step × 5 steps = −37.5
+    # This makes the push-off phase itself unprofitable, closing the loophole
+    # that airborne_penalty leaves open.  See torso_height_reward comment for
+    # the complete net-reward calculation.
+    "root_lin_vel_penalty": RewardTermCfg(
+      func=mdp.root_lin_vel_penalty,
+      weight=-0.3,
+      params={"asset_cfg": SceneEntityCfg("robot")},
     ),
     # height_gated_ang_vel: replaces body_angular_velocity_penalty (ungated).
     # Zero below 0.40 m (floor recovery phase) → rolling/flipping are allowed.
@@ -540,22 +563,21 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
         "grace_period_steps": 20,   # 0.4 s — policy gets time to respond before termination fires
       },
     ),
-    # joint_vel_overflow: physics explosion safety net.
-    # MuJoCo constraint overflow causes joint velocities to diverge to infinity
-    # in 1–2 steps. The rsl_rl check_nan() catches the resulting NaN in the
-    # next observation and crashes the entire training run. This termination
-    # fires at 50 rad/s — well above aggressive recovery (~15 rad/s) — to reset
-    # the exploding episode before NaN propagates. The is_terminated=-50 penalty
-    # discourages whatever action sequence triggered the explosion.
-    # joint_vel_overflow: threshold raised 50 → 100 rad/s.
-    # 50 rad/s was too sensitive: a vigorous but valid leg-kick to stand (knee
-    # extension at high speed) can reach 40–60 rad/s, triggering false positives.
-    # 100 rad/s is still far below MuJoCo constraint-overflow velocities (>500+)
-    # but allows normal aggressive recovery motions without termination.
+    # joint_vel_overflow: physics explosion safety net (joint velocity + root velocity).
+    # Two detection paths:
+    # 1. Joint velocity >100 rad/s: MuJoCo constraint overflow manifesting as joint
+    #    velocity divergence.  100 rad/s allows aggressive leg-kicks (~15-20 rad/s)
+    #    while catching constraint overflow (>500+ rad/s, usually NaN).
+    # 2. Root link linear velocity >15 m/s (NEW): rigid-body launches where all
+    #    joints move together (relative joint velocities stay low) but the entire
+    #    robot is flung upward by a ground-clipping corrective impulse.  Normal
+    #    recovery: max ~4 m/s (free-fall from 0.8 m standing height).  Physics
+    #    explosion from arm clipping: 10–30 m/s.  15 m/s is a safe threshold.
     "joint_vel_overflow": TerminationTermCfg(
       func=mdp.joint_velocity_overflow,
       params={
-        "threshold": 100.0,  # rad/s — was 50; raised to avoid false positives on hard leg-kick
+        "threshold": 100.0,           # rad/s — joint velocity overflow
+        "root_vel_threshold": 15.0,   # m/s — rigid-body launch from ground clipping
         "asset_cfg": SceneEntityCfg("robot"),
       },
     ),

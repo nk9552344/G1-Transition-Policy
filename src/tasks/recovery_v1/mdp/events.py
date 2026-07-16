@@ -77,29 +77,37 @@ _COS15 = math.cos(math.radians(15))
 _SIN10 = math.sin(math.radians(10))  # half-angle for 20° lean (squat_lean templates)
 _COS10 = math.cos(math.radians(10))
 
-# base_z raised 0.25 → 0.30 m: provides 5 cm more clearance so that
-# fallen_leg_perturbation on hip/knee/ankle joints cannot push feet below the
-# terrain surface.  The robot falls 0.05 m further before contacting the ground
-# (~0.10 s extra at 1 g) which is negligible for a 35 s episode.
+# base_z raised 0.25 → 0.30 → 0.35 m:
+# At 0.30 m the arm joints (shoulder+elbow) perturbed by 0.4 rad can still push
+# the hand/forearm below the terrain surface.  In prone position the sagittal body
+# plane is vertical, so shoulder_pitch rotates the arm UP/DOWN in world Z.  With
+# shoulder+elbow both at −0.4 rad the combined downward excursion is
+#   0.25 × sin(0.4) + 0.20 × sin(0.4) ≈ 0.097 + 0.078 = 0.175 m
+# Shoulder height in prone ≈ base_z − 0.15 m (chest side faces down).  At 0.30 m:
+#   0.30 − 0.15 − 0.175 = −0.025 m  →  hand clips 2.5 cm below floor!
+# MuJoCo corrective impulse from even a 5 mm penetration on a 25 kg robot can
+# impart enough upward momentum to launch the entire body to 1–2 m height.
+# At 0.35 m (shoulder at 0.20 m): 0.20 − 0.175 = 0.025 m  →  safe clearance.
+# Even in the worst-case three-joint combination the arm stays above the floor.
 FALLEN_POSE_CONFIGS: list[dict] = [
   {
     "label": "supine",
-    "base_z": 0.30,
+    "base_z": 0.35,
     "quat_wxyz": [_COS45, 0.0, -_SIN45, 0.0],    # 90° around -Y
   },
   {
     "label": "prone",
-    "base_z": 0.30,
+    "base_z": 0.35,
     "quat_wxyz": [_COS45, 0.0, _SIN45, 0.0],     # 90° around +Y
   },
   {
     "label": "side_left",
-    "base_z": 0.30,
+    "base_z": 0.35,
     "quat_wxyz": [_COS45, -_SIN45, 0.0, 0.0],    # 90° around -X
   },
   {
     "label": "side_right",
-    "base_z": 0.30,
+    "base_z": 0.35,
     "quat_wxyz": [_COS45, _SIN45, 0.0, 0.0],     # 90° around +X
   },
 ]
@@ -290,14 +298,13 @@ def reset_to_fallen_or_bent_pose(
     joint_pos[is_fallen] = (default_joint_pos + fallen_noise)[is_fallen]
 
     # Override leg joints with a smaller perturbation when requested.
-    # fallen_joint_perturbation is intentionally large (0.4 rad) so the arm
-    # joints cover the shoulder-pitch range needed for push-up discovery.
-    # But applying that same range to hip/knee/ankle in fallen poses pushes
-    # feet below the terrain surface → MuJoCo fires large corrective impulses
-    # → robot flung into the air at episode start.
-    # With fallen_leg_perturbation=0.10, max leg displacement ≈
-    # (thigh + shank) × sin(0.10) ≈ 0.75 × 0.10 = 0.075 m, well within the
-    # 0.10–0.20 m clearance provided by base_z=0.30 m.
+    # fallen_joint_perturbation=0.25 is safe for arm joints (shoulder+elbow
+    # worst-case excursion 0.134 m, 0.066 m clearance at base_z=0.35 m).
+    # But even 0.25 rad on hip/knee/ankle can push feet below the terrain in
+    # sitting templates where feet are already at floor level.  A smaller
+    # fallen_leg_perturbation=0.05 keeps max leg displacement to
+    # (thigh + shank) × sin(0.05) ≈ 0.75 × 0.05 = 0.037 m — safely above floor
+    # even for sitting_low (base_z=0.28 m, feet on ground at reset).
     if fallen_leg_perturbation is not None:
       fallen_rows = torch.where(is_fallen)[0]  # (n_fallen,)
       for _jcfg in (knee_cfg, hip_pitch_cfg, ankle_cfg):

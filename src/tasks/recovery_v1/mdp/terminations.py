@@ -116,36 +116,50 @@ def bad_orientation_while_elevated(
 def joint_velocity_overflow(
   env: ManagerBasedRlEnv,
   threshold: float = 50.0,
+  root_vel_threshold: float = 15.0,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-  """Terminate episode when physics explodes (joint velocity overflow detector).
+  """Terminate episode when physics explodes (joint velocity OR rigid-body launch).
 
-  MuJoCo constraint equations can overflow when contact forces spike (e.g. the
-  robot lands hard or makes a large abrupt joint motion with decimation=4).
-  When they do, joint velocities diverge toward infinity in one or two steps —
-  too fast for the angular-velocity or action-rate penalties to suppress.
+  Two independent detection paths:
 
-  The overflow manifests as NaN in joint_vel observations, which crashes the
-  rsl_rl check_nan() call and kills the entire training run.
+  1. Joint velocity overflow (original):
+     MuJoCo constraint equations can overflow when contact forces spike.  When
+     they do, joint velocities diverge toward infinity in 1–2 steps — too fast
+     for the angular-velocity or action-rate penalties to suppress.  Threshold
+     100 rad/s catches this before NaN propagates.
 
-  This termination catches the explosion BEFORE the NaN step by flagging any
-  environment where any joint velocity exceeds `threshold` rad/s.  Normal
-  recovery motions stay well under 15–20 rad/s; 50 rad/s is only reached
-  during physics instability.
+  2. Root linear velocity overflow (NEW):
+     When the robot is launched as a RIGID BODY (e.g., ground-clipping corrective
+     impulse from arm joints clipping the floor at reset), joint velocities relative
+     to each other stay LOW (the entire body moves as a unit) but the pelvis link
+     linear velocity spikes to 10–30 m/s.  joint_velocity_overflow at threshold=100
+     does NOT catch this case!  Adding a root_link_lin_vel_w > root_vel_threshold
+     check closes this gap.
+
+     Normal recovery motions:
+       - Stand-up from crouch: ~0.5 m/s → well below 15 m/s
+       - Falling from standing height (0.8 m): sqrt(2×9.8×0.8) ≈ 4 m/s → safe
+     Physics explosion from ground clipping:
+       - MuJoCo corrective impulse on ~25 kg body: 10–30 m/s → terminates
 
   Effect: the exploding episode is reset immediately, receiving `is_terminated`
   penalty (-50) which discourages whatever action sequence triggered the
-  explosion.  All other environments continue normally — training does not crash.
+  explosion.
 
   Args:
-    threshold: Joint velocity (rad/s) above which the episode is terminated.
-      Recommended 50.0 — well above aggressive recovery (~15 rad/s) but below
-      the ~100+ rad/s seen during constraint overflow.
+    threshold: Max joint velocity (rad/s) above which the episode terminates.
+      Recommended 100 rad/s — allows aggressive recovery (~15–20 rad/s) while
+      catching constraint overflow (>100 rad/s).
+    root_vel_threshold: Root link linear velocity (m/s) above which the episode
+      terminates.  Recommended 15 m/s — never reached in normal recovery, but
+      common in physics explosions from ground clipping.
     asset_cfg: SceneEntityCfg for the robot.
 
   Returns:
     Bool tensor [B]: True = terminate this env.
   """
   asset = env.scene[asset_cfg.name]
-  max_joint_vel = asset.data.joint_vel.abs().max(dim=1).values  # (B,)
-  return max_joint_vel > threshold
+  max_joint_vel = asset.data.joint_vel.abs().max(dim=1).values        # (B,)
+  root_lin_vel  = asset.data.root_link_lin_vel_w.norm(dim=1)          # (B,)
+  return (max_joint_vel > threshold) | (root_lin_vel > root_vel_threshold)

@@ -45,6 +45,7 @@ from .rewards import (                             # noqa: F401
   orientation_recovery,
   pose_convergence_gated,
   pushup_support_reward,
+  root_lin_vel_penalty,
   shank_orientation_reward,
   torso_height_reward,
 )

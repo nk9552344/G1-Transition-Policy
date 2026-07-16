@@ -766,9 +766,54 @@ def airborne_penalty(
 
   any_foot = (foot_sensor.data.found > 0).any(dim=1).float()                       # (B,)
   any_arm  = (arm_sensor.data.found  > 0).any(dim=1).float()                       # (B,)
-  has_contact = (any_foot + any_arm).clamp(0.0, 1.0)                               # (B,)
+
+  # Arm contact exemption is only valid when the robot is NOT inverted.
+  # Without this gate the "bridge trick" is possible: one arm drags on the floor
+  # while the robot slowly arcs backward (proj_gz goes from -0.3 to +0.5),
+  # earning full Phase rewards at low root velocity without triggering airborne_penalty.
+  # Gate: proj_gz < 0.3 = robot is upright or flat (not backward-tilted past ~73°).
+  #   Push-up (proj_gz ≈ -0.3): not_inverted=1 → arm contact exempts ✓
+  #   Bridge  (proj_gz ≈ +0.5): not_inverted=0 → arm contact does NOT exempt ✓
+  proj_gz     = asset.data.projected_gravity_b[:, 2]                               # (B,)
+  not_inverted = (proj_gz < 0.3).float()                                           # (B,)
+
+  has_contact = (any_foot + any_arm * not_inverted).clamp(0.0, 1.0)               # (B,)
 
   return elevated * (1.0 - has_contact)                                             # (B,)
+
+
+def root_lin_vel_penalty(
+  env: ManagerBasedRlEnv,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Penalise explosive whole-body linear velocity (anti-jump, anti-launch).
+
+  Normal recovery motions earn near-zero penalty:
+    push-up rise (~0.3 m/s):  −0.3 × 0.09 = −0.027/step  (negligible)
+    stand-up transition (~0.5 m/s): −0.3 × 0.25 = −0.075/step (negligible)
+
+  An explosive jump or physics launch earns a large penalty:
+    explosive jump push-off (~5 m/s): −0.3 × 25 = −7.5/step
+    full jump trajectory  (~8 m/s):   −0.3 × 64 = −19.2/step
+
+  This makes the GROUND-CONTACT PUSH-OFF PHASE of a jump unprofitable, which
+  the airborne_penalty (fires only after feet leave floor) cannot address.
+  Combined with airborne_penalty, a 10-step jump from squat incurs:
+    push-off (5 steps, ~5 m/s):  −0.3 × 25 × 5  = −37.5
+    airborne (5 steps, ~8 m/s):  −0.3 × 64 × 5  = −96.0
+    airborne_penalty:             −10.0 × 5      = −50.0
+    is_terminated:                                 −50.0
+    Phase rewards:                +14/step × 10  = +140
+    Net: +140 − 37.5 − 96 − 50 − 50 = −93.5  →  NOT profitable.
+
+  Also catches rigid-body physics launches at reset (all joints move together,
+  joint_velocity_overflow may not fire, but root velocity spikes to 10–30 m/s).
+
+  Returns root linear velocity squared (B,). Multiply by negative weight in config.
+  """
+  asset = env.scene[asset_cfg.name]
+  lin_vel = asset.data.root_link_lin_vel_w  # (B, 3)
+  return (lin_vel ** 2).sum(dim=1)          # (B,)
 
 
 def head_above_feet_reward(
