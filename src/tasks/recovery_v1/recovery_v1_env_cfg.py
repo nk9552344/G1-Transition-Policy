@@ -231,7 +231,8 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
         "all_pose_configs": ALL_POSE_CONFIGS,
         "xy_pos_range": 0.5,
         "yaw_range": math.pi,
-        "fallen_joint_perturbation": 0.4,  # was 0.6; 0.6 clips arm geoms below ground on reset → jump artifact
+        "fallen_joint_perturbation": 0.4,  # arm joints: 0.4 rad needed for push-up shoulder-pitch range
+        "fallen_leg_perturbation":   0.10, # leg joints only: small to prevent hip+knee+ankle stacking feet below floor
         "leg_perturbation": 0.10,
         "other_perturbation": 0.35,
         # Fallen-state-specific initial velocities (small to prevent floor bounce).
@@ -451,6 +452,23 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
       func=mdp.body_orientation_l2,
       weight=-1.0,  # was -3.0; −3.0 makes lying state net-negative, driving aggressive jump escape
       params={"asset_cfg": SceneEntityCfg("robot", body_names=())},  # set per-robot
+    ),
+    # airborne_penalty: direct anti-jump-hacking reward.
+    # Phase 2 rewards (shank=3.5 + head=2.5 + feet=2.0 = +9/step) all fire
+    # simultaneously during a brief jump from squat, earning +45–90 before
+    # is_terminated=-50 fires.  Net +5 to +40 → jump is profitable.
+    # With this penalty at -10.0: airborne 5 steps → -50.
+    # Net = +45 (Phase 2) - 50 (airborne) - 50 (termination) = -55 → NOT profitable.
+    # Does NOT fire during push-up (arm contact, pelvis below 0.40 m gate).
+    "airborne_penalty": RewardTermCfg(
+      func=mdp.airborne_penalty,
+      weight=-10.0,
+      params={
+        "min_height": 0.40,             # m — push-up pelvis (~0.30-0.35 m) is below this gate
+        "foot_sensor_name": "feet_ground_contact",
+        "arm_sensor_name":  "arm_ground_contact",
+        "asset_cfg": SceneEntityCfg("robot"),
+      },
     ),
     # height_gated_ang_vel: replaces body_angular_velocity_penalty (ungated).
     # Zero below 0.40 m (floor recovery phase) → rolling/flipping are allowed.

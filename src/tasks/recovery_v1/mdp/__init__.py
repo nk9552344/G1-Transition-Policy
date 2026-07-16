@@ -33,6 +33,7 @@ from src.tasks.transition_v2.mdp.rewards import (  # noqa: F401
 # Recovery-v1 additions.
 from .events import reset_to_fallen_or_bent_pose   # noqa: F401
 from .rewards import (                             # noqa: F401
+  airborne_penalty,
   arm_reach_down,
   base_height_obs,
   elbow_push_from_ground,

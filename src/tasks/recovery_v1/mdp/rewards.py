@@ -717,6 +717,60 @@ def base_height_obs(
   return height
 
 
+def airborne_penalty(
+  env: ManagerBasedRlEnv,
+  min_height: float,
+  foot_sensor_name: str,
+  arm_sensor_name: str,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Penalise being elevated with no ground contact (prevents jump-hacking).
+
+  The Phase 2 rewards (shank_orientation + head_above_feet + feet_proximity)
+  sum to ~+9/step and fire simultaneously during a brief jump from squat
+  position.  Over 5–10 airborne steps this earns +45–90, outweighing
+  is_terminated=-50.  This penalty fires at -1.0 per step whenever the robot
+  is elevated AND has no foot OR arm contact, directly making that jump
+  unprofitable:
+
+    airborne 5 steps × (-10.0) = -50
+    Phase 2 reward 5 steps      = +45
+    is_terminated               = -50
+    Net = -55  →  NOT profitable
+
+  Does NOT fire during:
+    Push-up   (arm contact, pelvis ~0.30–0.35 m < min_height):  contact AND below gate
+    Kneeling  (foot contact):                                    has_contact = 1
+    Standing  (foot contact):                                    has_contact = 1
+
+  DOES fire during:
+    Jump from squat (pelvis > min_height, no foot or arm contact): = 1.0/step
+
+  Args:
+    min_height: Pelvis height (m) below which penalty is inactive.
+      Recommended 0.40 m — push-up pelvis (~0.30–0.35 m) is below this.
+    foot_sensor_name: Ground contact sensor for feet.
+    arm_sensor_name:  Ground contact sensor for arms/elbows.
+    asset_cfg: SceneEntityCfg for the robot.
+
+  Returns:
+    Tensor [B]: 1.0 when airborne+elevated, 0.0 otherwise.
+    Multiply by negative weight (e.g. -10.0) in the reward config.
+  """
+  asset = env.scene[asset_cfg.name]
+  foot_sensor: ContactSensor = env.scene[foot_sensor_name]
+  arm_sensor:  ContactSensor = env.scene[arm_sensor_name]
+
+  base_height = asset.data.root_link_pos_w[:, 2] - env.scene.env_origins[:, 2]   # (B,)
+  elevated    = (base_height > min_height).float()                                  # (B,)
+
+  any_foot = (foot_sensor.data.found > 0).any(dim=1).float()                       # (B,)
+  any_arm  = (arm_sensor.data.found  > 0).any(dim=1).float()                       # (B,)
+  has_contact = (any_foot + any_arm).clamp(0.0, 1.0)                               # (B,)
+
+  return elevated * (1.0 - has_contact)                                             # (B,)
+
+
 def head_above_feet_reward(
   env: ManagerBasedRlEnv,
   target_height: float,

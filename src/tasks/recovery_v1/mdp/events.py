@@ -77,25 +77,29 @@ _COS15 = math.cos(math.radians(15))
 _SIN10 = math.sin(math.radians(10))  # half-angle for 20° lean (squat_lean templates)
 _COS10 = math.cos(math.radians(10))
 
+# base_z raised 0.25 → 0.30 m: provides 5 cm more clearance so that
+# fallen_leg_perturbation on hip/knee/ankle joints cannot push feet below the
+# terrain surface.  The robot falls 0.05 m further before contacting the ground
+# (~0.10 s extra at 1 g) which is negligible for a 35 s episode.
 FALLEN_POSE_CONFIGS: list[dict] = [
   {
     "label": "supine",
-    "base_z": 0.25,
+    "base_z": 0.30,
     "quat_wxyz": [_COS45, 0.0, -_SIN45, 0.0],    # 90° around -Y
   },
   {
     "label": "prone",
-    "base_z": 0.25,
+    "base_z": 0.30,
     "quat_wxyz": [_COS45, 0.0, _SIN45, 0.0],     # 90° around +Y
   },
   {
     "label": "side_left",
-    "base_z": 0.25,
+    "base_z": 0.30,
     "quat_wxyz": [_COS45, -_SIN45, 0.0, 0.0],    # 90° around -X
   },
   {
     "label": "side_right",
-    "base_z": 0.25,
+    "base_z": 0.30,
     "quat_wxyz": [_COS45, _SIN45, 0.0, 0.0],     # 90° around +X
   },
 ]
@@ -197,6 +201,7 @@ def reset_to_fallen_or_bent_pose(
   fallen_lin_vel_range: float | None = None,
   fallen_ang_vel_range: float | None = None,
   fallen_joint_vel_range: float | None = None,
+  fallen_leg_perturbation: float | None = None,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> None:
   """Reset each environment to a randomly sampled fallen or bent-leg pose.
@@ -243,6 +248,11 @@ def reset_to_fallen_or_bent_pose(
       If None, falls back to ang_vel_range. Recommend 0.10 rad/s.
     fallen_joint_vel_range: ±range (rad/s) for fallen-state joint velocities.
       If None, falls back to joint_vel_range. Recommend 0.05 rad/s.
+    fallen_leg_perturbation: ±noise (rad) applied to knee/hip/ankle joints for
+      fallen templates, OVERRIDING the broader fallen_joint_perturbation.
+      If None, leg joints use fallen_joint_perturbation (old behaviour).
+      Recommend 0.10 rad — prevents hip+knee+ankle stacking from pushing feet
+      below the ground plane (which fires large MuJoCo corrective impulses).
     knee_cfg, hip_pitch_cfg, ankle_cfg: Resolved SceneEntityCfg objects
       providing joint IDs for the leg joints (used by bent templates).
     asset_cfg: Resolved SceneEntityCfg for the full robot.
@@ -278,6 +288,28 @@ def reset_to_fallen_or_bent_pose(
       -fallen_joint_perturbation, fallen_joint_perturbation
     )
     joint_pos[is_fallen] = (default_joint_pos + fallen_noise)[is_fallen]
+
+    # Override leg joints with a smaller perturbation when requested.
+    # fallen_joint_perturbation is intentionally large (0.4 rad) so the arm
+    # joints cover the shoulder-pitch range needed for push-up discovery.
+    # But applying that same range to hip/knee/ankle in fallen poses pushes
+    # feet below the terrain surface → MuJoCo fires large corrective impulses
+    # → robot flung into the air at episode start.
+    # With fallen_leg_perturbation=0.10, max leg displacement ≈
+    # (thigh + shank) × sin(0.10) ≈ 0.75 × 0.10 = 0.075 m, well within the
+    # 0.10–0.20 m clearance provided by base_z=0.30 m.
+    if fallen_leg_perturbation is not None:
+      fallen_rows = torch.where(is_fallen)[0]  # (n_fallen,)
+      for _jcfg in (knee_cfg, hip_pitch_cfg, ankle_cfg):
+        if len(_jcfg.joint_ids) == 0:
+          continue
+        _ids = torch.tensor(_jcfg.joint_ids, dtype=torch.long, device=device)
+        _leg_noise = torch.empty(
+          len(fallen_rows), len(_ids), device=device
+        ).uniform_(-fallen_leg_perturbation, fallen_leg_perturbation)
+        joint_pos[fallen_rows.unsqueeze(1), _ids.unsqueeze(0)] = (
+          default_joint_pos[fallen_rows][:, _ids] + _leg_noise
+        )
 
   # --- Bent envs: other_perturbation base, then leg-joint overrides ---------
   if (~is_fallen).any():
@@ -353,7 +385,7 @@ def reset_to_fallen_or_bent_pose(
 
   # --- Positions -----------------------------------------------------------
   xy_noise = torch.empty(n, 2, device=device).uniform_(-xy_pos_range, xy_pos_range)
-  z_noise  = torch.empty(n,    device=device).uniform_(-0.02, 0.05)  # asymmetric: don't go below ground
+  z_noise  = torch.empty(n,    device=device).uniform_(0.0, 0.05)    # only add height, never subtract (prevents floor clips)
 
   positions = torch.cat(
     [
