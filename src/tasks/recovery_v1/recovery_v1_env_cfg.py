@@ -358,6 +358,17 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
     # sustained push-up position. The robot learns to HOLD the push-up, not
     # to bounce. Weight 4.0 (was 3.5 for elbow_push_from_ground — slightly
     # higher because this reward is harder to achieve by accident).
+    # pushup_support_reward: height_gate lowered 0.65 → 0.42 m.
+    # At 0.65 m the reward fires throughout the all-fours phase (pelvis 0.42–0.50 m),
+    # creating a local optimum: the robot earns +3.1/step from pushup_support in
+    # all-fours, making the transition to kneeling (arms lift, immediate −4.0 loss)
+    # look unprofitable over the GAE horizon (~33 steps).
+    # At 0.42 m the reward is zero once the robot rises above the push-up zone.
+    # Phase boundaries after the fix:
+    #   Push-up  (pelvis 0.30–0.42 m): reward fires → push-up learning ✓
+    #   All-fours (pelvis > 0.42 m):   reward = 0   → no incentive to keep arms down ✓
+    #   Kneeling  (pelvis ~0.55 m):    +12.73/step > all-fours +11.68 → kneeling better ✓
+    #   Standing  (pelvis ~0.78 m):    +18.2/step  → best → natural endpoint ✓
     "pushup_support_reward": RewardTermCfg(
       func=mdp.pushup_support_reward,
       weight=4.0,
@@ -365,7 +376,7 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
         "sensor_name": "arm_ground_contact",  # set per-robot in G1 config
         "target_height": 0.35,   # m — G1 elbow in push-up position
         "std": 0.20,             # m — gradient from floor (0.10 m) to push-up (0.35 m)
-        "height_gate": 0.65,     # m — suppress once robot is nearly standing
+        "height_gate": 0.42,     # m — was 0.65; suppress above push-up zone, prevents all-fours optimum
         "flat_gate_threshold": -0.70,  # active until 46° from upright
         "asset_cfg": SceneEntityCfg("robot", body_names=()),  # set per-robot (elbow bodies)
       },
