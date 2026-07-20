@@ -721,36 +721,31 @@ def airborne_penalty(
   env: ManagerBasedRlEnv,
   min_height: float,
   foot_sensor_name: str,
-  arm_sensor_name: str,
+  arm_sensor_name: str | None = None,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
   """Penalise being elevated with no ground contact (prevents jump-hacking).
 
-  The Phase 2 rewards (shank_orientation + head_above_feet + feet_proximity)
-  sum to ~+9/step and fire simultaneously during a brief jump from squat
-  position.  Over 5–10 airborne steps this earns +45–90, outweighing
-  is_terminated=-50.  This penalty fires at -1.0 per step whenever the robot
-  is elevated AND has no foot OR arm contact, directly making that jump
-  unprofitable:
+  Fires at 1.0 per step when the robot is elevated (base_height > min_height)
+  AND has no foot contact (and no arm contact, if arm_sensor_name is provided).
 
-    airborne 5 steps × (-10.0) = -50
-    Phase 2 reward 5 steps      = +45
-    is_terminated               = -50
-    Net = -55  →  NOT profitable
+  min_height design:
+    Set min_height to just below the lowest STANDING height — NOT the floor-
+    recovery height.  If min_height is too low it fires during floor recovery:
+      supine base_z = 0.35 m, proj_gz ≈ +1 (inverted) → arm exemption disabled
+      → penalty fires every step → -10 × 0.02 × 1750 = -350 per episode.
+    Recommended: 0.65 m (all floor-recovery phases < 0.65 m are exempt).
 
-  Does NOT fire during:
-    Push-up   (arm contact, pelvis ~0.30–0.35 m < min_height):  contact AND below gate
-    Kneeling  (foot contact):                                    has_contact = 1
-    Standing  (foot contact):                                    has_contact = 1
-
-  DOES fire during:
-    Jump from squat (pelvis > min_height, no foot or arm contact): = 1.0/step
+  arm_sensor_name (optional):
+    When None, only foot contact is checked.  When provided, arm contact also
+    exempts from the penalty but only when the robot is not inverted
+    (proj_gz < 0.3): the "bridge trick" — arm dragging while arcing backward —
+    should not exempt.
 
   Args:
-    min_height: Pelvis height (m) below which penalty is inactive.
-      Recommended 0.40 m — push-up pelvis (~0.30–0.35 m) is below this.
+    min_height: Pelvis height (m) below which the penalty is inactive.
     foot_sensor_name: Ground contact sensor for feet.
-    arm_sensor_name:  Ground contact sensor for arms/elbows.
+    arm_sensor_name:  Ground contact sensor for arms. Pass None to skip.
     asset_cfg: SceneEntityCfg for the robot.
 
   Returns:
@@ -759,25 +754,20 @@ def airborne_penalty(
   """
   asset = env.scene[asset_cfg.name]
   foot_sensor: ContactSensor = env.scene[foot_sensor_name]
-  arm_sensor:  ContactSensor = env.scene[arm_sensor_name]
 
   base_height = asset.data.root_link_pos_w[:, 2] - env.scene.env_origins[:, 2]   # (B,)
   elevated    = (base_height > min_height).float()                                  # (B,)
 
   any_foot = (foot_sensor.data.found > 0).any(dim=1).float()                       # (B,)
-  any_arm  = (arm_sensor.data.found  > 0).any(dim=1).float()                       # (B,)
 
-  # Arm contact exemption is only valid when the robot is NOT inverted.
-  # Without this gate the "bridge trick" is possible: one arm drags on the floor
-  # while the robot slowly arcs backward (proj_gz goes from -0.3 to +0.5),
-  # earning full Phase rewards at low root velocity without triggering airborne_penalty.
-  # Gate: proj_gz < 0.3 = robot is upright or flat (not backward-tilted past ~73°).
-  #   Push-up (proj_gz ≈ -0.3): not_inverted=1 → arm contact exempts ✓
-  #   Bridge  (proj_gz ≈ +0.5): not_inverted=0 → arm contact does NOT exempt ✓
-  proj_gz     = asset.data.projected_gravity_b[:, 2]                               # (B,)
-  not_inverted = (proj_gz < 0.3).float()                                           # (B,)
-
-  has_contact = (any_foot + any_arm * not_inverted).clamp(0.0, 1.0)               # (B,)
+  if arm_sensor_name is not None:
+    arm_sensor: ContactSensor = env.scene[arm_sensor_name]
+    any_arm = (arm_sensor.data.found > 0).any(dim=1).float()                       # (B,)
+    proj_gz = asset.data.projected_gravity_b[:, 2]                                 # (B,)
+    not_inverted = (proj_gz < 0.3).float()                                         # (B,)
+    has_contact = (any_foot + any_arm * not_inverted).clamp(0.0, 1.0)             # (B,)
+  else:
+    has_contact = any_foot                                                          # (B,)
 
   return elevated * (1.0 - has_contact)                                             # (B,)
 

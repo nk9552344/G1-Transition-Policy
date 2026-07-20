@@ -1,14 +1,21 @@
 """Unitree G1 recovery-v1 environment configuration.
 
-Applies G1-specific overrides on top of the base recovery-v1 environment,
-following the same pattern as the v3 G1 override.
+Applies G1-specific overrides on top of the base recovery-v1 environment:
+  - Robot model and FK-verified joint defaults
+  - Ground contact sensor for feet (with force, track_air_time)
+  - Self-collision sensor
+  - G1_ACTION_SCALE per joint
+  - Body/joint name resolution for all reward terms that reference named links
+  - Viewer camera attached to torso_link
+
+Arm ground-contact sensor removed in this version: arm-based rewards
+(arm_reach_down, pushup_support_reward) are not wired in the base config.
 """
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.event_manager import EventTermCfg
-from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
 
@@ -57,26 +64,9 @@ def unitree_g1_recovery_v1_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     history_length=4,
   )
 
-  # Arm ground contact sensor.
-  # Primary: subtree of left_elbow_link and right_elbow_link — covers all forearm
-  # geoms (elbow_yaw, wrist, hand).  Two primary patterns → shape (B, 2).
-  arm_ground_cfg = ContactSensorCfg(
-    name="arm_ground_contact",
-    primary=ContactMatch(
-      mode="subtree",
-      pattern=r"^(left_elbow_link|right_elbow_link)$",
-      entity="robot",
-    ),
-    secondary=ContactMatch(mode="body", pattern="terrain"),
-    fields=("found",),
-    reduce="none",   # no force field collected; "netforce" would be a schema mismatch
-    num_slots=1,
-  )
-
   cfg.scene.sensors = (cfg.scene.sensors or ()) + (
     feet_ground_cfg,
     self_collision_cfg,
-    arm_ground_cfg,
   )
 
   joint_pos_action = cfg.actions["joint_pos"]
@@ -85,53 +75,26 @@ def unitree_g1_recovery_v1_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
   cfg.viewer.body_name = "torso_link"
 
-  # ── Actor observation wiring ──────────────────────────────────────────────────
-  # foot_contact in actor: same sensor as critic, no extra sensor needed.
+  # ── Observation wiring ────────────────────────────────────────────────────────
   cfg.observations["actor"].terms["foot_contact"].params[
     "sensor_name"
   ] = feet_ground_cfg.name
 
-  # arm_contact in actor: reads arm_ground_contact sensor's found field.
-  # Uses mdp.foot_contact (same pattern — reads sensor.data.found.float()).
-  cfg.observations["actor"].terms["arm_contact"].params[
-    "sensor_name"
-  ] = arm_ground_cfg.name
-
-  # ── Critic observation wiring ─────────────────────────────────────────────────
   cfg.observations["critic"].terms["foot_contact"].params[
     "sensor_name"
   ] = feet_ground_cfg.name
   cfg.observations["critic"].terms["foot_contact_forces"].params[
     "sensor_name"
   ] = feet_ground_cfg.name
-  cfg.observations["critic"].terms["arm_contact"].params[
-    "sensor_name"
-  ] = arm_ground_cfg.name
 
   # ── Domain randomisation targets ─────────────────────────────────────────────
   cfg.events["foot_friction"].params["asset_cfg"].geom_names = geom_names
   cfg.events["base_com"].params["asset_cfg"].body_names = ("torso_link",)
 
   # ── Reward body references ────────────────────────────────────────────────────
-  cfg.rewards["body_orientation_l2"].params["asset_cfg"].body_names = ("torso_link",)
   cfg.rewards["torso_height_reward"].params["asset_cfg"].body_names = ("torso_link",)
-
-  # height_gated_ang_vel: same body as old body_ang_vel (torso_link).
   cfg.rewards["height_gated_ang_vel"].params["asset_cfg"].body_names = ("torso_link",)
 
-  # arm_reach_down tracks wrist_yaw_link bodies.
-  cfg.rewards["arm_reach_down"].params["asset_cfg"].body_names = (
-    "left_wrist_yaw_link",
-    "right_wrist_yaw_link",
-  )
-
-  # pushup_support_reward tracks elbow_link bodies (same as former elbow_push_from_ground).
-  cfg.rewards["pushup_support_reward"].params["asset_cfg"].body_names = (
-    "left_elbow_link",
-    "right_elbow_link",
-  )
-
-  # shank_orientation_reward: knee_link → ankle_roll_link.
   cfg.rewards["shank_orientation_reward"].params["knee_asset_cfg"].body_names = (
     "left_knee_link",
     "right_knee_link",
@@ -141,14 +104,12 @@ def unitree_g1_recovery_v1_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     "right_ankle_roll_link",
   )
 
-  # head_above_feet_reward: head estimated from torso_link; feet from ankle_roll_links.
   cfg.rewards["head_above_feet_reward"].params["torso_asset_cfg"].body_names = ("torso_link",)
   cfg.rewards["head_above_feet_reward"].params["foot_asset_cfg"].body_names = (
     "left_ankle_roll_link",
     "right_ankle_roll_link",
   )
 
-  # feet_proximity_reward tracks ankle_roll_links.
   cfg.rewards["feet_proximity_reward"].params["asset_cfg"].body_names = (
     "left_ankle_roll_link",
     "right_ankle_roll_link",

@@ -1,41 +1,24 @@
 """RL configuration for the Unitree G1 recovery-v1 task.
 
-Key changes from previous failed training:
+lam: 0.95 → 0.97
+  With λ=0.95 and γ=0.99, the GAE effective horizon = 1/(1-γλ) ≈ 17 steps =
+  0.34 seconds.  Floor recovery takes 5–15 seconds.  A roll that pays off at
+  t=1 s is beyond the 0.34 s horizon, so it looks unprofitable.  λ=0.97
+  doubles the horizon to 0.67 s, making 1-second recovery sequences visible.
 
-  lam: 0.95 → 0.97
-    This is the single most impactful fix.  With λ=0.95 and γ=0.99, the GAE
-    effective horizon = 1/(1-γλ) ≈ 17 steps = 0.34 seconds.  Floor recovery
-    takes 5–15 seconds: rolling from supine (1 s), push-up (1 s), sit-to-stand
-    (2 s), stabilisation (1 s).  A policy at step 0 that initiates a roll can
-    only see rewards within 0.34 s.  The roll pays off at t=1 s — beyond the
-    GAE horizon — so it looks unprofitable.  With λ=0.97 the effective horizon
-    doubles to 0.67 s, making 1-second recovery actions visible and profitable.
+num_steps_per_env: 56 → 80
+  Match the λ=0.97 GAE horizon: 80 steps = 1.6 s spans the 0.67 s horizon
+  with margin.  At 56 steps some bootstrapped value is outside the rollout.
 
-    Numerical verification (roll taking 50 steps / 1 s):
-      λ=0.95: discounted orientation gain = 0.18 × Σ(0.9405)^t ≈ +2.89
-              discounted ang_vel penalty  = 0.072 × Σ(0.9405)^t ≈ −1.16
-              net advantage = +1.73  (positive but noisy; std collapse still wins)
-      λ=0.97: discounted orientation gain = 0.18 × Σ(0.9603)^t ≈ +3.87
-              discounted ang_vel penalty  = 0.072 × Σ(0.9603)^t ≈ −1.55
-              net advantage = +2.32  (stronger signal → resists std collapse)
-      (ang_vel penalty is also height-gated to zero during floor phase, making
-       the advantage even larger in practice.)
+entropy_coef: 0.04 → 0.01
+  High entropy was needed when the reward landscape was dominated by the
+  (now-fixed) airborne_penalty: fallen episodes gave -350 per episode,
+  collapsing the reward to ~200 regardless of actions, so exploration was
+  needed to escape.  With the airborne_penalty bug fixed, entropy_coef=0.01
+  is sufficient and prevents premature std inflation that degrades balance.
 
-  num_steps_per_env: 56 → 80
-    Longer rollouts match the longer GAE horizon: with λ=0.97 you need to
-    capture at least 1/(1-0.97) ≈ 33 steps of future rewards per update.
-    80 steps = 1.6 s of experience per env per update, fully spanning the
-    0.67 s effective horizon.  At 56 steps some of the bootstrapped value
-    is outside the rollout, adding noise to the GAE calculation.
-
-  entropy_coef: 0.03 → 0.05
-    Std collapsed from 0.9 → 0.35 by step 400 in the previous run, leaving
-    fallen episodes with insufficient action variety to discover get-up motions.
-    Higher entropy coefficient maintains a larger action distribution and
-    slows the premature convergence to the bouncing local optimum.
-
-  init_std: kept at 1.0
-    Recovery requires large exploratory actions.  1.0 is correct.
+init_std: 1.0
+  Recovery requires large exploratory actions.  1.0 is correct.
 """
 
 from mjlab.rl import (
