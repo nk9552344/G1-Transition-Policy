@@ -100,6 +100,15 @@ FALLEN_POSE_CONFIGS: list[dict] = [
     "base_z": 0.35,
     "quat_wxyz": [_COS45, 0.0, _SIN45, 0.0],     # 90° around +Y
   },
+]
+
+# Side-lying templates deferred to recovery-v2.
+# Including them here (36 % fallen total) pulled the scalar PPO std too high:
+# 63 % non-upright starts → std stabilised at ~0.7–1.0 → upright episodes
+# terminated within the grace period → policy avoided standing altogether.
+# Supine + prone (22 % fallen) gives enough floor-recovery gradient while
+# keeping the upright fraction at 44 %, compatible with balance-level std.
+_SIDE_POSE_CONFIGS_DEFERRED: list[dict] = [
   {
     "label": "side_left",
     "base_z": 0.35,
@@ -172,16 +181,13 @@ SQUAT_LEAN_CONFIGS: list[dict] = [
   },
 ]
 
-# Unified list: 4 fallen + 2 sitting + 1 squat_lean + 4 bent = 11 templates (36 / 18 / 9 / 36 %).
-# Side-lying templates now included: G1 frequently falls to its side and the
-# policy must learn to recover from that configuration.  Without side_left /
-# side_right starts the policy never trains for the lateral-roll-to-prone step.
-#
-# Fallen fraction increased from 22 % → 36 %: more fallen experience reduces
-# the std-bias that 44 % upright starts produced (balance skill dominated,
-# leaving too little exploration capacity for recovery).
+# Unified list: 2 fallen + 2 sitting + 1 squat_lean + 4 bent = 9 templates (22 / 22 / 11 / 44 %).
+# 44 % bent-upright keeps the scalar PPO std in the range compatible with both
+# balance (~0.1) and recovery (~1.0): enough upright gradient to prevent std
+# collapse toward recovery-only, enough floor-recovery gradient to discover
+# the full get-up sequence.
 ALL_POSE_CONFIGS: list[dict] = [
-  {**cfg, "type": "fallen"}     for cfg in FALLEN_POSE_CONFIGS        # supine, prone, side_left, side_right
+  {**cfg, "type": "fallen"}     for cfg in FALLEN_POSE_CONFIGS        # supine, prone
 ] + [
   {**cfg, "type": "fallen"}     for cfg in SITTING_POSE_CONFIGS       # sitting-up states
 ] + [

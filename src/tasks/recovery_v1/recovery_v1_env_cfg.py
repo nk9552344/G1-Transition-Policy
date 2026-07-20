@@ -457,12 +457,15 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
     # ── Penalties ─────────────────────────────────────────────────────────────
 
     # body_orientation_l2: weight −3.0 → −1.0.
+    # Computes sum(proj_gravity_XY²): 0 when upright, 1 when flat, 0 when INVERTED.
+    # The zero-when-inverted blind spot is intentional: orientation_recovery (+3.0)
+    # already distinguishes upright (reward=3.0) from inverted (reward=0.055) with
+    # a large gradient, so an extra penalty is not needed for that case.
     # At −3.0, the flat-state L2 penalty is ≈ −3.0/step when lying (max error).
     # Combined with orientation_recovery (+1.11 when flat), the net per-step is
     # −1.89 for the entire lying phase. This creates constant pressure to escape
-    # flat state aggressively → driving the explosive jump behavior. orientation_recovery
-    # already provides the upright gradient; the penalty only needs to reinforce it.
-    # At −1.0 the net is +0.11/step when flat (neutral), still −1.0 when upright.
+    # flat state aggressively → driving the explosive jump behavior.
+    # At −1.0 the net is +0.11/step when flat (neutral), 0 penalty when upright.
     "body_orientation_l2": RewardTermCfg(
       func=mdp.body_orientation_l2,
       weight=-1.0,  # was -3.0; −3.0 makes lying state net-negative, driving aggressive jump escape

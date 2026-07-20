@@ -36,10 +36,8 @@ from .rewards import (                             # noqa: F401
   airborne_penalty,
   arm_reach_down,
   base_height_obs,
-  elbow_push_from_ground,
   feet_proximity_reward,
   head_above_feet_reward,
-  head_height_reward,
   height_gated_ang_vel_penalty,
   height_recovery,
   orientation_recovery,
@@ -48,6 +46,9 @@ from .rewards import (                             # noqa: F401
   root_lin_vel_penalty,
   shank_orientation_reward,
   torso_height_reward,
+  # elbow_push_from_ground — REMOVED: velocity-based, replaced by pushup_support_reward
+  # head_height_reward     — unused: superseded by head_above_feet_reward (relative height)
+  # orientation_rate       — NOT wired: velocity-based (max(0, ω·dg/dt)), gameable by oscillation
 )
 from .terminations import (                                # noqa: F401
   bad_orientation_while_elevated,

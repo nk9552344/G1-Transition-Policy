@@ -84,7 +84,7 @@ def unitree_g1_recovery_v1_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
       value_loss_coef=1.0,
       use_clipped_value_loss=True,
       clip_param=0.2,
-      entropy_coef=0.04,       # was 0.05; reduced to limit over-exploration from upright starts
+      entropy_coef=0.01,       # reduced from 0.04; 44 % upright starts no longer need high entropy to prevent std collapse
       num_learning_epochs=5,
       num_mini_batches=4,
       learning_rate=1.0e-3,

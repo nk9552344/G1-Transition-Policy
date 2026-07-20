@@ -69,7 +69,7 @@ def unitree_g1_recovery_v1_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     ),
     secondary=ContactMatch(mode="body", pattern="terrain"),
     fields=("found",),
-    reduce="netforce",
+    reduce="none",   # no force field collected; "netforce" would be a schema mismatch
     num_slots=1,
   )
 
