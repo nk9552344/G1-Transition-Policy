@@ -83,7 +83,9 @@ def bad_orientation_while_elevated(
       Recommended: 0.65 m — raised from v3's 0.50 m to avoid penalising the
       prone→bridge→squat path which passes through 0.50 m while still tilted.
     grace_period_steps: Number of steps at the start of each episode during
-      which the termination is suppressed.  Recommended: 20 (= 0.4 s at 50 Hz).
+      which the termination is suppressed.  Recommended: 40 (= 0.8 s at 50 Hz)
+      — see env_cfg fell_over comment for full rationale (GAE attribution, previous
+      value was 20 which still attributed ~80% of the -50 penalty to step 0).
       Set to 0 to disable (original behaviour).
     asset_cfg: Resolved SceneEntityCfg for the robot.
 
@@ -115,7 +117,7 @@ def bad_orientation_while_elevated(
 
 def joint_velocity_overflow(
   env: ManagerBasedRlEnv,
-  threshold: float = 50.0,
+  threshold: float = 100.0,
   root_vel_threshold: float = 15.0,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:

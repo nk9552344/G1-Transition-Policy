@@ -279,8 +279,10 @@ def feet_proximity_reward(
 
   Args:
     height_gate: Minimum pelvis height (m) for the reward to activate.
-      Recommended 0.35 m -- just above prone pelvis height (~0.25 m) so the
-      reward only fires when the robot has raised itself off the floor.
+      Recommended 0.25 m — activates from SITTING_LOW (base_z=0.28 m) onward.
+      WARNING: do NOT use 0.28 m — the strict (pelvis_z > gate) condition evaluates
+      False at SITTING_LOW (0.28 > 0.28 = False), silencing the foot-tuck gradient
+      exactly at the state that needs it most.
     std: Gaussian width (m) for the foot-to-pelvis XY distance.
       Recommended 0.45 m -- provides gradient from the start of the knee-tuck.
     asset_cfg: Resolved SceneEntityCfg for the ankle/foot bodies (body_names
@@ -524,9 +526,10 @@ def shank_orientation_reward(
 
   Args:
     height_gate: Minimum pelvis height (m) for the reward to activate.
-      Recommended 0.30 m — activates once the pelvis clears the floor but
-      before the full sit-up phase, so the policy starts receiving the signal
-      early in the recovery trajectory.
+      Recommended 0.25 m — activates early in the lift-off phase (matches the
+      feet_proximity_reward gate) while still suppressing noise from shanks
+      flat on the floor (fallen base_z=0.35 m > 0.25 m fires from the start,
+      but shank cosine ≈ 0 when flat gives near-zero reward there anyway).
     std: Gaussian width on (shank_cosine − 1). std=0.50 gives:
       cosine=0 (horizontal): exp(-4.0) ≈ 0.02;  cosine=0.5: exp(-1.0) ≈ 0.37;
       cosine=0.7: exp(-0.36) ≈ 0.70;  cosine=0.9: exp(-0.08) ≈ 0.92;  cosine=1.0: 1.0.
@@ -535,10 +538,14 @@ def shank_orientation_reward(
     knee_asset_cfg:  SceneEntityCfg with 2 body_ids (left and right knee links).
     ankle_asset_cfg: SceneEntityCfg with 2 body_ids (left and right ankle roll links).
   """
-  asset = env.scene[knee_asset_cfg.name]
+  # Fetch each entity separately so body_ids are always indexed against the correct
+  # entity's body_link_pos_w tensor, even if knee and ankle configs ever reference
+  # different scene entities.
+  knee_asset  = env.scene[knee_asset_cfg.name]
+  ankle_asset = env.scene[ankle_asset_cfg.name]
 
-  knee_pos  = asset.data.body_link_pos_w[:, knee_asset_cfg.body_ids,  :]  # (B, 2, 3)
-  ankle_pos = asset.data.body_link_pos_w[:, ankle_asset_cfg.body_ids, :]  # (B, 2, 3)
+  knee_pos  = knee_asset.data.body_link_pos_w[:, knee_asset_cfg.body_ids,  :]   # (B, 2, 3)
+  ankle_pos = ankle_asset.data.body_link_pos_w[:, ankle_asset_cfg.body_ids, :]  # (B, 2, 3)
 
   shank_vec    = ankle_pos - knee_pos                                   # (B, 2, 3): knee→ankle
   shank_len    = ((shank_vec ** 2).sum(dim=-1)).sqrt().clamp(min=1e-6)  # (B, 2)
@@ -554,7 +561,7 @@ def shank_orientation_reward(
 
   # Height gate: suppress during the flat push-up phase.
   origins_z = env.scene.env_origins[:, 2]
-  pelvis_z  = asset.data.root_link_pos_w[:, 2] - origins_z             # (B,)
+  pelvis_z  = knee_asset.data.root_link_pos_w[:, 2] - origins_z        # (B,)
   gate      = (pelvis_z > height_gate).float()                         # (B,)
 
   return reward * gate
@@ -837,29 +844,36 @@ def head_above_feet_reward(
 
   Args:
     target_height: Target head-above-feet height (m).
-      G1 standing: head ~1.28 m above feet. Recommended 1.15 m — gives max
-      reward when upright without requiring perfect posture.
+      G1 standing: head ~1.28 m above feet.
+      Recommended 1.25 m — peaks just below standing height, giving a clear
+      positive gradient from squat (1.15 m above feet) to standing.
+      WARNING: do NOT use 1.15 m — that is the G1 squat head-above-feet height,
+      which makes the Gaussian peak at squat and inverts the SQUAT→STANDING gradient.
     std: Gaussian width (m). 0.25 m produces:
       Sitting (0.88 m above feet): exp(-1.17) ≈ 0.31
-      Standing (1.28 m above feet): exp(-0.27) ≈ 0.76
-      A 2.5× difference vs the 1.5× at the absolute height formulation.
+      Squat   (1.15 m above feet): exp(-1.60) ≈ 0.20  [below target=1.25]
+      Target  (1.25 m above feet): exp(0.00)  = 1.00
+      Standing(1.28 m above feet): exp(-0.14) ≈ 0.86
+      Net gradient squat→standing: +0.66 — strong positive signal.
     head_offset: Head geom center height above torso_link origin (m). G1 = 0.43 m.
     torso_asset_cfg: SceneEntityCfg for the torso body (body_names set per robot).
     foot_asset_cfg:  SceneEntityCfg for the foot bodies (body_names set per robot,
       two bodies — left and right ankle roll links).
   """
-  asset     = env.scene[torso_asset_cfg.name]
-  origins_z = env.scene.env_origins[:, 2]                               # (B,)
+  torso_asset = env.scene[torso_asset_cfg.name]
+  foot_asset  = env.scene[foot_asset_cfg.name]
+  origins_z   = env.scene.env_origins[:, 2]                             # (B,)
 
   torso_z = (
-    asset.data.body_link_pos_w[:, torso_asset_cfg.body_ids, 2].squeeze(1) - origins_z
+    torso_asset.data.body_link_pos_w[:, torso_asset_cfg.body_ids, 2].squeeze(1) - origins_z
   )  # (B,)
-  proj_gz = asset.data.projected_gravity_b[:, 2]                        # (B,)
+  proj_gz = torso_asset.data.projected_gravity_b[:, 2]                  # (B,)
   head_z  = torso_z + head_offset * (-proj_gz)                          # (B,)
 
   # Average foot Z (both ankles), relative to terrain.
+  # Use foot_asset (separate entity reference) to correctly resolve foot_asset_cfg.body_ids.
   foot_z  = (
-    asset.data.body_link_pos_w[:, foot_asset_cfg.body_ids, 2].mean(dim=1) - origins_z
+    foot_asset.data.body_link_pos_w[:, foot_asset_cfg.body_ids, 2].mean(dim=1) - origins_z
   )  # (B,)
 
   head_above_feet = head_z - foot_z                                     # (B,)

@@ -117,7 +117,13 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
   # (0.70 m) which have similar projected_gravity but need opposite actions.
   # foot_contact in actor: tells the policy whether to plant feet (standing)
   # or tuck them (recovery) — phase detection context.
-  # arm_contact removed: no arm-based rewards in this version, sensor unneeded.
+  # arm_contact in actor: tells the policy whether its arm is pressing the floor.
+  #   Critical for pushup_support_reward: the reward is contact-gated, so the
+  #   policy must observe the contact state to learn "arm on floor → extend elbow."
+  #   Without this, the policy cannot distinguish "arm approaching floor" from
+  #   "arm on floor" and cannot close the push-up learning loop.
+  #   Reuses mdp.foot_contact (generic ContactSensor → found boolean) with a
+  #   different sensor name; no new function needed.
   actor_terms = {
     "base_ang_vel": ObservationTermCfg(
       func=mdp.builtin_sensor,
@@ -143,6 +149,10 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
     "foot_contact": ObservationTermCfg(
       func=mdp.foot_contact,
       params={"sensor_name": "feet_ground_contact"},  # wired per-robot in G1 config
+    ),
+    "arm_contact": ObservationTermCfg(
+      func=mdp.foot_contact,                          # generic: returns sensor.data.found
+      params={"sensor_name": "arm_ground_contact"},   # wired per-robot in G1 config
     ),
     "actions": ObservationTermCfg(func=mdp.last_action),
   }
@@ -357,7 +367,10 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
       func=mdp.head_above_feet_reward,
       weight=2.5,
       params={
-        "target_height": 1.15,
+        "target_height": 1.25,   # was 1.15 — 1.15m is the G1 SQUAT head-above-feet height,
+                                  # so the Gaussian peaked at squat and inverted SQUAT→STANDING.
+                                  # G1 standing head-above-feet ≈ 1.28m; target 1.25m puts the
+                                  # peak just below standing, giving a clear positive gradient.
         "std": 0.25,
         "head_offset": 0.43,
         "torso_asset_cfg": SceneEntityCfg("robot", body_names=()),  # set per-robot
@@ -368,7 +381,10 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
       func=mdp.feet_proximity_reward,
       weight=2.0,
       params={
-        "height_gate": 0.28,
+        "height_gate": 0.25,   # was 0.28 — strict (pelvis_z > gate) evaluated False at SITTING_LOW
+                                # (base_z=0.28 → 0.28 > 0.28 = False), silencing the foot-tuck signal
+                                # exactly at the state that needs it most. 0.25 matches the
+                                # shank_orientation_reward gate and fires at SITTING_LOW.
         "std": 0.45,
         "asset_cfg": SceneEntityCfg("robot", body_names=()),  # set per-robot
       },
@@ -425,7 +441,12 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
       params={
         "min_height": 0.65,             # was 0.20 m — see module docstring root cause 1
         "foot_sensor_name": "feet_ground_contact",
-        "arm_sensor_name":  None,       # arm sensor removed in this version
+        "arm_sensor_name":  None,       # arm contact exemption intentionally omitted:
+                                        # penalty only fires above 0.65 m (near-standing
+                                        # height) where arm-on-ground is irrelevant.
+                                        # The arm_ground_contact sensor exists in G1 config
+                                        # and is used by pushup_support_reward — it just
+                                        # does not exempt the airborne_penalty here.
         "asset_cfg": SceneEntityCfg("robot"),
       },
     ),

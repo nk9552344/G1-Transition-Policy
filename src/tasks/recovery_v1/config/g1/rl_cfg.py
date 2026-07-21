@@ -4,10 +4,13 @@ lam: 0.95 → 0.97
   With λ=0.95 and γ=0.99, the GAE effective horizon = 1/(1-γλ) ≈ 17 steps =
   0.34 seconds.  Floor recovery takes 5–15 seconds.  A roll that pays off at
   t=1 s is beyond the 0.34 s horizon, so it looks unprofitable.  λ=0.97
-  doubles the horizon to 0.67 s, making 1-second recovery sequences visible.
+  extends the horizon to 25 steps ≈ 0.50 s (1.5× longer, not 2× — previous
+  comment was wrong: 1/(1-0.97×0.99) = 1/0.0397 ≈ 25 steps).
+  The dense orientation_rate reward (added in this version) bypasses this
+  limit by giving per-step credit for each rotational improvement.
 
 num_steps_per_env: 56 → 80
-  Match the λ=0.97 GAE horizon: 80 steps = 1.6 s spans the 0.67 s horizon
+  Match the λ=0.97 GAE horizon: 80 steps = 1.6 s spans the 0.50 s horizon
   with margin.  At 56 steps some bootstrapped value is outside the rollout.
 
 entropy_coef: 0.04 → 0.01

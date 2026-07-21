@@ -63,9 +63,10 @@ def unitree_g1_recovery_v1_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   )
 
   # Arm ground-contact sensor for push-up guidance.
-  # Covers the elbow subtree (elbow + wrist + hand geoms) — same as the
-  # former arm sensor used by pushup_support_reward in previous versions.
-  # Two slots: left arm (index 0), right arm (index 1).
+  # Covers the elbow subtree (elbow + wrist + hand geoms).
+  # Two primaries: left arm (index 0), right arm (index 1).
+  # num_slots=1 means one net-force aggregate per primary arm.
+  # Output found shape: [B, N_primaries * num_slots] = [B, 2].
   arm_ground_cfg = ContactSensorCfg(
     name="arm_ground_contact",
     primary=ContactMatch(
@@ -95,10 +96,16 @@ def unitree_g1_recovery_v1_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg.observations["actor"].terms["foot_contact"].params[
     "sensor_name"
   ] = feet_ground_cfg.name
+  cfg.observations["actor"].terms["arm_contact"].params[
+    "sensor_name"
+  ] = arm_ground_cfg.name
 
   cfg.observations["critic"].terms["foot_contact"].params[
     "sensor_name"
   ] = feet_ground_cfg.name
+  cfg.observations["critic"].terms["arm_contact"].params[
+    "sensor_name"
+  ] = arm_ground_cfg.name
   cfg.observations["critic"].terms["foot_contact_forces"].params[
     "sensor_name"
   ] = feet_ground_cfg.name

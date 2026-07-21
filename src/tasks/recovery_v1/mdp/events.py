@@ -31,14 +31,14 @@ zone that exploration from a sitting start rarely reaches: 20° lean + knee=1.2 
 + pelvis at 0.52 m, exactly where shank_orientation_reward provides its strongest
 gradient toward standing.  Side-lying poses are deferred to recovery_v2.
 
-Fallen templates set the pelvis height to 0.25 m and apply a random world-
+Fallen templates set the pelvis height to 0.35 m and apply a random world-
 frame yaw so the robot faces a different direction every episode.  Bent
 templates use the FK-verified heights from v3.
 
-Base heights for fallen poses (0.25 m) are intentionally set slightly above
-the true contact height (~0.10–0.15 m) so the robot settles onto the ground
-without floor penetration.  The small drop (<0.1 s at regular gravity) is
-negligible for a 35 s episode.
+Base heights for fallen poses (0.35 m) are intentionally raised above the
+true contact height (~0.10–0.15 m) to prevent arm joints from clipping below
+the floor (see FALLEN_POSE_CONFIGS comment for the full analysis).  The small
+drop (<0.1 s at regular gravity) is negligible for a 30 s episode.
 """
 
 from __future__ import annotations
@@ -136,7 +136,7 @@ _SIDE_POSE_CONFIGS_DEFERRED: list[dict] = [
 #   provide the primary upward gradient.
 #
 # sitting_high — 30° backward lean (proj_gz ≈ -0.87), pelvis at 0.38 m.
-#   Pelvis is above the feet_proximity_reward gate (0.35 m), so the policy
+#   Pelvis is above the feet_proximity_reward gate (0.25 m), so the policy
 #   immediately receives feet-proximity gradient and can explore the knee-tuck
 #   motion. Covers the transition region between sit-up and squat.
 # ──────────────────────────────────────────────────────────────────────────────
@@ -149,7 +149,7 @@ SITTING_POSE_CONFIGS: list[dict] = [
   {
     "label": "sitting_high",
     "base_z": 0.38,
-    "quat_wxyz": [_COS15, 0.0, -_SIN15, 0.0],   # 30° backward lean; pelvis above feet_proximity gate (0.35 m)
+    "quat_wxyz": [_COS15, 0.0, -_SIN15, 0.0],   # 30° backward lean; pelvis above feet_proximity gate (0.25 m)
   },
 ]
 
