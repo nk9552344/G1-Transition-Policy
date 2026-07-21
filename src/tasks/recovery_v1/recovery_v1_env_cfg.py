@@ -47,12 +47,17 @@ Root cause 3 — training from random init is fundamentally hard (DESIGN NOTE):
   it from scratch.  Cold-start training will still converge with the fixes
   above but takes approximately 2–3× longer.
 
-Reward design (simplified, 15 terms)
+Reward design (simplified, 18 terms)
 ──────────────────────────────────────
   Phase 1 — get off the floor:
     orientation_recovery  (+3.0)  primary upright signal; exp(-(proj_gz+1)²/1.0)
+    orientation_rate      (+0.5)  dense per-step rotation toward upright (bypasses GAE horizon)
     height_recovery       (+2.0)  pelvis rising toward 0.78 m
     torso_height_reward   (+2.0)  chest rising; prevents leg-bridge optimum
+
+  Phase 1b — arm push-up guidance:
+    arm_reach_down        (+1.0)  hands toward floor (dense pre-contact gradient)
+    pushup_support_reward (+1.5)  elbow elevated while arm on floor (position-based)
 
   Phase 2 — sit to stand:
     shank_orientation     (+3.5)  shanks vertical (knee tuck signal)
@@ -74,8 +79,6 @@ Reward design (simplified, 15 terms)
     is_terminated         (-50.0)
 
 Removed from previous version:
-  arm_reach_down        — see root cause 2
-  pushup_support_reward — see root cause 2
   body_orientation_l2   — redundant with orientation_recovery; sign is wrong when inverted
   angular_momentum      — secondary signal, adds sensor noise
   joint_acc_l2          — negligible weight (-5e-8), irrelevant
@@ -259,6 +262,22 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
         "asset_cfg": SceneEntityCfg("robot"),
       },
     ),
+    # Dense per-step rotation guidance toward upright.
+    # orientation_recovery is position-based (proj_gz → -1) but credit must
+    # survive a 100–500 step delay (kneeling→standing = 2–10 s, GAE horizon
+    # ≈ 25 steps at λ=0.97). orientation_rate makes every rotation step
+    # immediately rewarding, bypassing the credit-assignment gap.
+    # It is gated off once nearly upright (proj_gz < -0.9) so it does not
+    # add noise during balance maintenance.
+    # Unlike torso_upward_velocity (max(0, v_z), farmable), oscillation here
+    # means alternating tilt (flat → kneeling → flat), which loses
+    # orientation_recovery + height_recovery on the return stroke; net is
+    # negative. The farming concern does not apply.
+    "orientation_rate": RewardTermCfg(
+      func=mdp.orientation_rate,
+      weight=0.5,
+      params={"asset_cfg": SceneEntityCfg("robot")},
+    ),
     "height_recovery": RewardTermCfg(
       func=mdp.height_recovery,
       weight=2.0,
@@ -275,6 +294,50 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
         "target_height": 0.90,
         "std": 0.50,
         "asset_cfg": SceneEntityCfg("robot", body_names=()),  # set per-robot
+      },
+    ),
+
+    # ── Phase 1b: arm push-up guidance ───────────────────────────────────────
+    # These two rewards were removed in the previous rewrite because "contact
+    # is required and rarely achieved by random init."  That was correct at the
+    # time (base_z=0.30 m, fallen_joint_perturbation=0.40 m → arm clipping).
+    # They are re-enabled now because:
+    #   (a) base_z raised to 0.35 m and fallen_joint_perturbation=0.25 rad
+    #       prevents floor penetration — some fraction of fallen resets DO have
+    #       the arm near the floor by chance.
+    #   (b) The policy already discovers the push-up position (screenshots
+    #       confirm arms-extended lying pose) but then collapses back because
+    #       there is no reward signal to SUSTAIN the elevated elbow.
+    #   (c) Both rewards are position-based (not velocity-based) so they are
+    #       not farmable by oscillation.
+    #
+    # arm_reach_down: dense Gaussian on hand-to-floor distance, active when flat.
+    # Provides gradient BEFORE arm contact, pulling hands toward the floor.
+    # asset_cfg must have body_names set to the two wrist/hand bodies per robot.
+    "arm_reach_down": RewardTermCfg(
+      func=mdp.arm_reach_down,
+      weight=1.0,
+      params={
+        "height_gate": 0.60,
+        "flat_gate_threshold": -0.70,
+        "asset_cfg": SceneEntityCfg("robot", body_names=()),  # set per-robot (wrist bodies)
+      },
+    ),
+    # pushup_support_reward: position-based elbow elevation while arm on floor.
+    # Rewards HOLDING the push-up position (elbow at ~0.35 m) rather than
+    # oscillating (elbow at floor level earns 0.21 per step vs 1.0 sustained).
+    # Requires arm contact sensor; sensor_name set to None here and overridden
+    # per-robot config.  asset_cfg must resolve to the two elbow bodies.
+    "pushup_support_reward": RewardTermCfg(
+      func=mdp.pushup_support_reward,
+      weight=1.5,
+      params={
+        "sensor_name": "arm_ground_contact",  # set per-robot
+        "target_height": 0.35,
+        "std": 0.20,
+        "height_gate": 0.65,
+        "flat_gate_threshold": -0.70,
+        "asset_cfg": SceneEntityCfg("robot", body_names=()),  # set per-robot (elbow bodies)
       },
     ),
 

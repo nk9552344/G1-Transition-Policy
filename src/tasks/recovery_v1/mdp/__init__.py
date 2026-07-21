@@ -24,19 +24,19 @@ from src.tasks.transition_v2.mdp.rewards import (  # noqa: F401
 from .events import reset_to_fallen_or_bent_pose   # noqa: F401
 from .rewards import (                             # noqa: F401
   airborne_penalty,
+  arm_reach_down,
   base_height_obs,
   feet_proximity_reward,
   head_above_feet_reward,
   height_gated_ang_vel_penalty,
   height_recovery,
+  orientation_rate,
   orientation_recovery,
   pose_convergence_gated,
+  pushup_support_reward,
   root_lin_vel_penalty,
   shank_orientation_reward,
   torso_height_reward,
-  # arm_reach_down        — removed: requires arm-ground contact discovery
-  # pushup_support_reward — removed: requires arm-ground contact discovery
-  # orientation_rate      — not wired: velocity-based, gameable by oscillation
   # elbow_push_from_ground — removed: velocity-based, replaced by pushup_support
   # head_height_reward     — removed: superseded by head_above_feet_reward
 )

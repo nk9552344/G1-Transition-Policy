@@ -4,12 +4,10 @@ Applies G1-specific overrides on top of the base recovery-v1 environment:
   - Robot model and FK-verified joint defaults
   - Ground contact sensor for feet (with force, track_air_time)
   - Self-collision sensor
+  - Arm ground-contact sensor (elbow subtree, for push-up guidance)
   - G1_ACTION_SCALE per joint
   - Body/joint name resolution for all reward terms that reference named links
   - Viewer camera attached to torso_link
-
-Arm ground-contact sensor removed in this version: arm-based rewards
-(arm_reach_down, pushup_support_reward) are not wired in the base config.
 """
 
 from mjlab.envs import ManagerBasedRlEnvCfg
@@ -64,9 +62,27 @@ def unitree_g1_recovery_v1_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     history_length=4,
   )
 
+  # Arm ground-contact sensor for push-up guidance.
+  # Covers the elbow subtree (elbow + wrist + hand geoms) — same as the
+  # former arm sensor used by pushup_support_reward in previous versions.
+  # Two slots: left arm (index 0), right arm (index 1).
+  arm_ground_cfg = ContactSensorCfg(
+    name="arm_ground_contact",
+    primary=ContactMatch(
+      mode="subtree",
+      pattern=r"^(left_elbow_link|right_elbow_link)$",
+      entity="robot",
+    ),
+    secondary=ContactMatch(mode="body", pattern="terrain"),
+    fields=("found",),
+    reduce="netforce",
+    num_slots=1,
+  )
+
   cfg.scene.sensors = (cfg.scene.sensors or ()) + (
     feet_ground_cfg,
     self_collision_cfg,
+    arm_ground_cfg,
   )
 
   joint_pos_action = cfg.actions["joint_pos"]
@@ -113,6 +129,21 @@ def unitree_g1_recovery_v1_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg.rewards["feet_proximity_reward"].params["asset_cfg"].body_names = (
     "left_ankle_roll_link",
     "right_ankle_roll_link",
+  )
+
+  # Arm push-up guidance wiring.
+  # arm_reach_down: dense hand-to-floor proximity — uses wrist/hand bodies
+  # (left_wrist_yaw_link and right_wrist_yaw_link are the distal hand bodies).
+  cfg.rewards["arm_reach_down"].params["asset_cfg"].body_names = (
+    "left_wrist_yaw_link",
+    "right_wrist_yaw_link",
+  )
+  # pushup_support_reward: elbow elevation while arm on floor.
+  # Sensor and elbow body names wired here; sensor_name set to arm_ground_cfg.
+  cfg.rewards["pushup_support_reward"].params["sensor_name"] = arm_ground_cfg.name
+  cfg.rewards["pushup_support_reward"].params["asset_cfg"].body_names = (
+    "left_elbow_link",
+    "right_elbow_link",
   )
 
   # Self-collision penalty.
