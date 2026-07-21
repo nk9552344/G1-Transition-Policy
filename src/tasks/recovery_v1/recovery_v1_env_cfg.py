@@ -51,16 +51,16 @@ Reward design (simplified, 18 terms)
 ──────────────────────────────────────
   Phase 1 — get off the floor:
     orientation_recovery  (+3.0)  primary upright signal; exp(-(proj_gz+1)²/1.0)
-    orientation_rate      (+0.5)  dense per-step rotation toward upright (bypasses GAE horizon)
+    orientation_rate      (+3.0)  dense per-step rotation toward upright (bypasses GAE horizon)
     height_recovery       (+2.0)  pelvis rising toward 0.78 m
     torso_height_reward   (+2.0)  chest rising; prevents leg-bridge optimum
 
   Phase 1b — arm push-up guidance:
-    arm_reach_down        (+1.0)  hands toward floor (dense pre-contact gradient)
-    pushup_support_reward (+1.5)  elbow elevated while arm on floor (position-based)
+    arm_reach_down        (+0.5)  hands toward floor (dense pre-contact gradient; gate 0.0)
+    pushup_support_reward (+0.5)  elbow elevated while arm on floor (position-based)
 
   Phase 2 — sit to stand:
-    shank_orientation     (+3.5)  shanks vertical (knee tuck signal)
+    shank_orientation     (+5.0)  shanks vertical (knee tuck signal)
     head_above_feet       (+2.5)  head vs feet relative height
     feet_proximity        (+2.0)  feet under pelvis
 
@@ -283,9 +283,12 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
     # means alternating tilt (flat → kneeling → flat), which loses
     # orientation_recovery + height_recovery on the return stroke; net is
     # negative. The farming concern does not apply.
+    # Weight raised 0.5→3.0: at 0.5 the rotation signal was too weak to break
+    # the push-up local optimum (0.5×0.5rad/s=0.25/s vs 3.67/s static push-up
+    # reward). At 3.0 and 0.5 rad/s rotation: 1.5/s — enough to dominate.
     "orientation_rate": RewardTermCfg(
       func=mdp.orientation_rate,
-      weight=0.5,
+      weight=3.0,
       params={"asset_cfg": SceneEntityCfg("robot")},
     ),
     "height_recovery": RewardTermCfg(
@@ -324,12 +327,20 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
     # arm_reach_down: dense Gaussian on hand-to-floor distance, active when flat.
     # Provides gradient BEFORE arm contact, pulling hands toward the floor.
     # asset_cfg must have body_names set to the two wrist/hand bodies per robot.
+    # flat_gate_threshold changed -0.70→0.0: at -0.70 the reward was active across
+    # the entire push-up→kneeling rotation range (proj_gz 0 to -0.70), creating a
+    # gradient that pulled hands BACK DOWN while the robot tried to rotate upright
+    # (hands naturally lift during rotation, reducing this reward → policy avoids
+    # rotation). At 0.0 the gate fires only when proj_gz>0 (robot is more inverted
+    # than horizontal, i.e. supine/inverted fall), and turns off the moment the
+    # robot starts rotating toward upright — no anti-rotation force.
+    # Weight also reduced 1.0→0.5 to further reduce the push-up local optimum depth.
     "arm_reach_down": RewardTermCfg(
       func=mdp.arm_reach_down,
-      weight=1.0,
+      weight=0.5,
       params={
         "height_gate": 0.60,
-        "flat_gate_threshold": -0.70,
+        "flat_gate_threshold": 0.0,
         "asset_cfg": SceneEntityCfg("robot", body_names=()),  # set per-robot (wrist bodies)
       },
     ),
@@ -338,9 +349,12 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
     # oscillating (elbow at floor level earns 0.21 per step vs 1.0 sustained).
     # Requires arm contact sensor; sensor_name set to None here and overridden
     # per-robot config.  asset_cfg must resolve to the two elbow bodies.
+    # Weight reduced 1.5→0.5: at 1.5 this was the dominant term in the push-up
+    # position (pushup+arm_reach_down+torso_height = 3.6/s), creating a deep local
+    # optimum. At 0.5 it guides without trapping.
     "pushup_support_reward": RewardTermCfg(
       func=mdp.pushup_support_reward,
-      weight=1.5,
+      weight=0.5,
       params={
         "sensor_name": "arm_ground_contact",  # set per-robot
         "target_height": 0.35,
@@ -353,9 +367,14 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
 
     # ── Phase 2: sit-to-stand ─────────────────────────────────────────────────
 
+    # Weight raised 3.5→5.0: the shank-vertical signal is the primary gradient
+    # for the push-up→kneeling transition (shanks horizontal in push-up, vertical
+    # in kneeling/standing). At 3.5 it was insufficient to overcome the push-up
+    # stability; at 5.0 it creates a 4.9/s improvement from push-up (cosine≈0)
+    # to kneeling/standing (cosine=1.0) vs the reduced push-up reward of ~1.6/s.
     "shank_orientation_reward": RewardTermCfg(
       func=mdp.shank_orientation_reward,
-      weight=3.5,
+      weight=5.0,
       params={
         "height_gate": 0.25,
         "std": 0.50,
