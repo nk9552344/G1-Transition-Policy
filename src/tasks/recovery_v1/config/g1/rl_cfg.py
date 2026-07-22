@@ -13,12 +13,13 @@ num_steps_per_env: 56 → 80
   Match the λ=0.97 GAE horizon: 80 steps = 1.6 s spans the 0.50 s horizon
   with margin.  At 56 steps some bootstrapped value is outside the rollout.
 
-entropy_coef: 0.04 → 0.01
-  High entropy was needed when the reward landscape was dominated by the
-  (now-fixed) airborne_penalty: fallen episodes gave -350 per episode,
-  collapsing the reward to ~200 regardless of actions, so exploration was
-  needed to escape.  With the airborne_penalty bug fixed, entropy_coef=0.01
-  is sufficient and prevents premature std inflation that degrades balance.
+entropy_coef: 0.04 → 0.01 → 0.02
+  High entropy was needed when airborne_penalty dominated (-350/episode).
+  Reduced to 0.01 once that bug was fixed.  Raised back to 0.02 to slow
+  premature commitment to local optima: at 0.01 the policy rapidly collapsed
+  orientation_rate farming (waist-oscillation) before ever discovering the
+  push-up→kneeling transition.  0.02 gives enough exploration to escape
+  without inflating the standing-balance std.
 
 init_std: 1.0
   Recovery requires large exploratory actions.  1.0 is correct.
@@ -70,7 +71,7 @@ def unitree_g1_recovery_v1_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
       value_loss_coef=1.0,
       use_clipped_value_loss=True,
       clip_param=0.2,
-      entropy_coef=0.01,       # reduced from 0.04; 44 % upright starts no longer need high entropy to prevent std collapse
+      entropy_coef=0.02,       # raised from 0.01; prevents rapid commitment to local optima (waist-wiggle collapse)
       num_learning_epochs=5,
       num_mini_batches=4,
       learning_rate=1.0e-3,

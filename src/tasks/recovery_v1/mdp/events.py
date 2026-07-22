@@ -4,14 +4,15 @@ The core new event is ``reset_to_fallen_or_bent_pose``, which extends v3's
 ``reset_to_bent_pose`` with two completely fallen orientations (supine, prone)
 so the robot learns to stand up from the most common ground-level positions.
 
-Nine templates are sampled uniformly each episode (22 % fallen, 22 % sitting, 11 % squat-lean, 44 % bent):
-  Fallen (22 %)                  Sitting-up (22 %)                 Bent-upright (44 %)
+Ten templates are sampled uniformly each episode (20 % fallen, 20 % sitting, 10 % squat-lean, 10 % floor-kneel, 40 % bent):
+  Fallen (20 %)                  Sitting-up (20 %)                 Bent-upright (40 %)
   ─────────────────────────────  ───────────────────────────────── ──────────────────────────────────────────
   supine     (on back, face up)  sitting_low  (40° backward lean)  home        (default standing, small bends)
   prone      (face down)         sitting_high (30° backward lean)  knees_bent  (moderate squat)
                                                                     squat       (deep knee bend)
                                                                     deep_squat  (maximum knee bend)
-  Squat-lean (11 %): squat_lean — 20° lean, knee=1.2 rad, pelvis 0.52 m  (sit-to-stand transition zone)
+  Squat-lean  (10 %): squat_lean  — 20° backward lean, knee=1.2 rad, pelvis 0.52 m (sit-to-stand transition)
+  Floor-kneel (10 %): floor_kneel — 40° FORWARD lean,  knee=1.8 rad, pelvis 0.50 m (prone recovery transition)
 
 Sampling ratio rationale
 ────────────────────────
@@ -30,6 +31,16 @@ the full push-up sequence.  The squat_lean template (11 %) covers the transition
 zone that exploration from a sitting start rarely reaches: 20° lean + knee=1.2 rad
 + pelvis at 0.52 m, exactly where shank_orientation_reward provides its strongest
 gradient toward standing.  Side-lying poses are deferred to recovery_v2.
+
+The floor_kneel template (10 %) covers the forward-recovery path that sitting
+templates do NOT cover.  Sitting templates use BACKWARD lean (robot fell backward,
+legs extended forward); floor_kneel uses FORWARD lean (robot fell forward/prone,
+legs tucked under body).  This template is the primary fix for the push-up local
+optimum: without floor_kneel, the critic has never seen V(floor_kneel) and assigns
+~V(flat)≈low to all states on the push-up→kneeling path — making leg-tuck actions
+look unprofitable and causing the robot to stay in push-up indefinitely.  With
+floor_kneel at 10%, the critic learns V(floor_kneel)≈high, which propagates to
+nearby states and gives the policy a clear incentive to tuck legs.
 
 Fallen templates set the pelvis height to 0.35 m and apply a random world-
 frame yaw so the robot faces a different direction every episode.  Bent
@@ -70,7 +81,7 @@ _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 # ──────────────────────────────────────────────────────────────────────────────
 _SIN45 = math.sin(math.pi / 4)
 _COS45 = math.cos(math.pi / 4)
-_SIN20 = math.sin(math.radians(20))  # half-angle for 40° backward lean
+_SIN20 = math.sin(math.radians(20))  # half-angle for 40° lean
 _COS20 = math.cos(math.radians(20))
 _SIN15 = math.sin(math.radians(15))  # half-angle for 30° backward lean
 _COS15 = math.cos(math.radians(15))
@@ -181,8 +192,47 @@ SQUAT_LEAN_CONFIGS: list[dict] = [
   },
 ]
 
-# Unified list: 2 fallen + 2 sitting + 1 squat_lean + 4 bent = 9 templates (22 / 22 / 11 / 44 %).
-# 44 % bent-upright keeps the scalar PPO std in the range compatible with both
+# ── Floor-kneel pose templates ───────────────────────────────────────────────────
+# Starting state for the FORWARD recovery path: body at 40° forward lean
+# (same direction as prone fall, i.e. +Y rotation), deeply bent knees (1.8 rad),
+# feet tucked under pelvis.
+#
+# This is the critical intermediate state between prone push-up (proj_gz≈0) and
+# kneeling/standing (proj_gz≈-1).  The SITTING templates cover the BACKWARD
+# recovery path (robot fell backward → sits up → stands).  This template covers
+# the FORWARD recovery path (robot fell forward/prone → push-up → floor_kneel →
+# stands).
+#
+# Without this template the critic assigns V(floor_kneel) ≈ V(flat) ≈ low because
+# it has never visited this state from fallen starts (the push-up→floor_kneel
+# transition takes ~150 steps, well outside the 80-step rollout window).  This
+# makes leg-tuck actions look unprofitable → policy stays in push-up indefinitely.
+#
+# With this template the critic learns V(floor_kneel) ≈ high (easy path to
+# standing from here).  This value propagates into fallen episodes: when the robot
+# reaches a state near floor_kneel within 80 steps, the bootstrapped value V(s₈₀)
+# is now accurate, giving the actor a correct positive advantage for leg-tuck.
+#
+# type="squat_lean": same reset logic as squat_lean — bent-style leg joints +
+# tilt quaternion override.  The +_SIN20 in quat_wxyz encodes FORWARD lean
+# (toward prone direction), opposite to the -_SIN20 of sitting_low's backward lean.
+#
+# FK estimate: knee=1.8, hip_pitch=-0.70, body at 40° forward lean → pelvis ~0.50m.
+# The robot may drop slightly at reset (small impulse, negligible for 30s episode).
+# ──────────────────────────────────────────────────────────────────────────────
+FLOOR_KNEEL_CONFIGS: list[dict] = [
+  {
+    "label": "floor_kneel",
+    "base_z": 0.50,
+    "quat_wxyz": [_COS20, 0.0, _SIN20, 0.0],   # 40° FORWARD lean (opposite of sitting_low's backward lean)
+    "knee": 1.80,
+    "hip_pitch": -0.70,
+    "ankle": -0.50,
+  },
+]
+
+# Unified list: 2 fallen + 2 sitting + 1 squat_lean + 1 floor_kneel + 4 bent = 10 templates (20/20/10/10/40%).
+# 40 % bent-upright keeps the scalar PPO std in the range compatible with both
 # balance (~0.1) and recovery (~1.0): enough upright gradient to prevent std
 # collapse toward recovery-only, enough floor-recovery gradient to discover
 # the full get-up sequence.
@@ -191,7 +241,9 @@ ALL_POSE_CONFIGS: list[dict] = [
 ] + [
   {**cfg, "type": "fallen"}     for cfg in SITTING_POSE_CONFIGS       # sitting-up states
 ] + [
-  {**cfg, "type": "squat_lean"} for cfg in SQUAT_LEAN_CONFIGS         # lean + knees-bent transition
+  {**cfg, "type": "squat_lean"} for cfg in SQUAT_LEAN_CONFIGS         # backward lean + knees-bent
+] + [
+  {**cfg, "type": "squat_lean"} for cfg in FLOOR_KNEEL_CONFIGS        # forward lean + knees-bent (prone recovery)
 ] + [
   {**cfg, "type": "bent"}       for cfg in BENT_POSE_CONFIGS
 ]

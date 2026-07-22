@@ -51,12 +51,12 @@ Reward design (simplified, 18 terms)
 ──────────────────────────────────────
   Phase 1 — get off the floor:
     orientation_recovery  (+3.0)  primary upright signal; exp(-(proj_gz+1)²/1.0)
-    orientation_rate      (+3.0)  dense per-step rotation toward upright (bypasses GAE horizon)
+    orientation_rate      (  0 )  DISABLED — farmable by waist oscillation; shank_orientation covers dense gradient
     height_recovery       (+2.0)  pelvis rising toward 0.78 m
     torso_height_reward   (+2.0)  chest rising; prevents leg-bridge optimum
 
   Phase 1b — arm push-up guidance:
-    arm_reach_down        (+0.5)  hands toward floor (dense pre-contact gradient; gate 0.0)
+    arm_reach_down        (+0.5)  hands toward floor (dense pre-contact gradient; gate proj_gz>0 only)
     pushup_support_reward (+0.5)  elbow elevated while arm on floor (position-based)
 
   Phase 2 — sit to stand:
@@ -182,16 +182,21 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
 
   # ── Events ────────────────────────────────────────────────────────────────────
   events = {
-    # ── Reset: 9-template curriculum ─────────────────────────────────────────
-    #    22 % fallen      (supine, prone)
-    #    22 % sitting-up  (sitting_low 40°, sitting_high 30°)
-    #    11 % squat-lean  (squat_lean 20° lean, knee=1.2 rad)
-    #    44 % bent-upright (home, knees_bent, squat, deep_squat)
+    # ── Reset: 10-template curriculum ────────────────────────────────────────
+    #    20 % fallen      (supine, prone)
+    #    20 % sitting-up  (sitting_low 40°, sitting_high 30°)
+    #    10 % squat-lean  (squat_lean 20° backward lean, knee=1.2 rad)
+    #    10 % floor-kneel (floor_kneel 40° FORWARD lean, knee=1.8 rad)  ← NEW
+    #    40 % bent-upright (home, knees_bent, squat, deep_squat)
     #
-    # With the airborne_penalty fixed (min_height=0.65m instead of 0.20m),
-    # fallen episodes no longer receive -350 per episode, so a 56% non-upright
-    # fraction no longer collapses average reward.  The 44% upright fraction
-    # maintains enough positive gradient for the policy to prefer standing.
+    # floor_kneel covers the prone-recovery path that sitting templates do not:
+    # sitting uses backward lean (fell backward → legs forward), floor_kneel uses
+    # forward lean (fell forward/prone → legs tucked under). Without this template
+    # the critic never learns V(floor_kneel)≈high, so leg-tuck actions from push-up
+    # look unprofitable (credit assignment gap: 150-step push-up→kneel transition
+    # is outside the 80-step rollout window). With floor_kneel at 10%, the critic
+    # sees floor_kneel directly and accurate values propagate to nearby states.
+    # 40% bent-upright maintains balance-compatible std (same as v3 sitting rationale).
     "reset_robot": EventTermCfg(
       func=mdp.reset_to_fallen_or_bent_pose,
       mode="reset",
@@ -272,23 +277,21 @@ def make_recovery_v1_env_cfg() -> ManagerBasedRlEnvCfg:
         "asset_cfg": SceneEntityCfg("robot"),
       },
     ),
-    # Dense per-step rotation guidance toward upright.
-    # orientation_recovery is position-based (proj_gz → -1) but credit must
-    # survive a 100–500 step delay (kneeling→standing = 2–10 s, GAE horizon
-    # ≈ 25 steps at λ=0.97). orientation_rate makes every rotation step
-    # immediately rewarding, bypassing the credit-assignment gap.
-    # It is gated off once nearly upright (proj_gz < -0.9) so it does not
-    # add noise during balance maintenance.
-    # Unlike torso_upward_velocity (max(0, v_z), farmable), oscillation here
-    # means alternating tilt (flat → kneeling → flat), which loses
-    # orientation_recovery + height_recovery on the return stroke; net is
-    # negative. The farming concern does not apply.
-    # Weight raised 0.5→3.0: at 0.5 the rotation signal was too weak to break
-    # the push-up local optimum (0.5×0.5rad/s=0.25/s vs 3.67/s static push-up
-    # reward). At 3.0 and 0.5 rad/s rotation: 1.5/s — enough to dominate.
+    # orientation_rate: DISABLED (weight=0.0) — farmable by torso oscillation.
+    # max(0, d(proj_gz)/dt) rewards the forward half of each oscillation cycle
+    # and gives 0 on the backward half.  At weight=3.0, a 2 rad/s waist-pitch
+    # oscillation earned +0.5/s continuously without any real recovery progress.
+    # This is the same class of bug as torso_upward_velocity (velocity-based,
+    # farmable) documented in feedback_velocity_rewards_oscillation.
+    #
+    # Credit assignment for push-up→kneeling is now handled by shank_orientation
+    # (weight=5.0, position-based): each step of leg tuck immediately improves
+    # the shank-vertical reward, providing dense per-step gradient that is
+    # non-farmable and credit-assignable within the 25-step GAE horizon.
+    # If kneeling local optimum appears at 3000+ iters, re-enable at weight=0.2.
     "orientation_rate": RewardTermCfg(
       func=mdp.orientation_rate,
-      weight=3.0,
+      weight=0.0,
       params={"asset_cfg": SceneEntityCfg("robot")},
     ),
     "height_recovery": RewardTermCfg(
